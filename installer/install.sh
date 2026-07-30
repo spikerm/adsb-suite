@@ -2,9 +2,9 @@
 set -euo pipefail
 [ "$EUID" -eq 0 ] || { echo "Gebruik: sudo ./installer/install.sh"; exit 1; }
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
-echo "ADS-B Suite v0.8.0 installeren/upgraden…"
+echo "ADS-B Suite v0.8.1 installeren/upgraden…"
 apt-get update
-apt-get install -y python3 python3-venv curl gzip sudo
+apt-get install -y python3 python3-venv curl gzip sudo nginx openssl
 
 if ! getent group adsbsuite >/dev/null; then groupadd --system adsbsuite; fi
 if ! id adsbsuite >/dev/null 2>&1; then
@@ -66,7 +66,7 @@ python3 - /opt/adsb-suite/server/adsb_suite.py <<'PY'
 from pathlib import Path
 import sys
 p=Path(sys.argv[1]); s=p.read_text(encoding='utf-8')
-for old in ('"0.3.0-beta2"','"0.4.0"','"0.5.0"','"0.6.0"','"0.7.0"'): s=s.replace(old,'"0.8.0"')
+for old in ('"0.3.0-beta2"','"0.4.0"','"0.5.0"','"0.6.0"','"0.7.0"','"0.8.0"'): s=s.replace(old,'"0.8.1"')
 s=s.replace(', metadata.get("icao_type"), item.get("type"))', ', metadata.get("icao_type"))')
 s=s.replace('"description": first_text(metadata.get("description"), model),','"description": first_text(item.get("desc"), metadata.get("description"), model),')
 s=s.replace('"operator": first_text(metadata.get("operator"), metadata.get("owner"), metadata.get("airline")),','"operator": first_text(item.get("ownOp"), metadata.get("operator"), metadata.get("owner"), metadata.get("airline")),')
@@ -86,7 +86,6 @@ python3 -m venv /opt/adsb-suite/venv
 /opt/adsb-suite/venv/bin/pip install --upgrade pip
 /opt/adsb-suite/venv/bin/pip install -r /opt/adsb-suite/server/requirements.txt
 
-ADMIN_PASSWORD=""
 if [ ! -f /etc/adsb-suite/config.json ]; then cp "$SRC/server/config.example.json" /etc/adsb-suite/config.json; fi
 python3 - /etc/adsb-suite/config.json <<'PY'
 import hashlib,json,secrets,sys
@@ -116,16 +115,23 @@ chmod 644 /var/lib/adsb-suite/aircraft.csv
 systemctl daemon-reload
 systemctl reset-failed adsb-suite.service 2>/dev/null || true
 systemctl enable --now adsb-suite.service
+
+chmod +x "$SRC/installer/setup-https.sh"
+"$SRC/installer/setup-https.sh"
+
 sleep 3
 systemctl --no-pager --full status adsb-suite.service || true
 IP=$(hostname -I | awk '{print $1}')
 echo
-echo "Dashboard:  http://${IP}:8090/"
-echo "Webbeheer:  http://${IP}:8090/admin"
-echo "API:        http://${IP}:8090/api/status"
+echo "Dashboard HTTP:  http://${IP}:8090/"
+echo "Dashboard HTTPS: https://${IP}:8443/"
+echo "Webbeheer:       https://${IP}:8443/admin"
+echo "CA-certificaat:  https://${IP}:8443/adsb-suite-ca.crt"
 if [ -s /run/adsb-suite-admin-password ]; then
   echo "Beheerwachtwoord: $(cat /run/adsb-suite-admin-password)"
   echo "Bewaar dit wachtwoord; het wordt slechts eenmaal getoond."
   rm -f /run/adsb-suite-admin-password
 fi
+echo "Installeer het CA-certificaat op Windows onder Vertrouwde basiscertificeringsinstanties."
+echo "Open daarna uitsluitend de HTTPS-URL en activeer Browsermeldingen."
 echo "Log: sudo journalctl -u adsb-suite -f"
