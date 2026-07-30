@@ -12,10 +12,12 @@ WorkingDirectory=/opt/adsb-suite/server
 ExecStart=/opt/adsb-suite/venv/bin/python /opt/adsb-suite/server/adsb_suite.py
 Restart=always
 RestartSec=5
-NoNewPrivileges=true
+# Webbeheer gebruikt uitsluitend de in sudoers toegestane admin-helper.
+# NoNewPrivileges en ProtectSystem blokkeren anders sudo en systeemonderhoud.
+NoNewPrivileges=false
 PrivateTmp=true
-ProtectSystem=full
-ReadWritePaths=/var/lib/adsb-suite
+ProtectSystem=false
+ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target
