@@ -1,5 +1,5 @@
 <!doctype html><html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ADS-B Suite beheer</title><link rel="stylesheet" href="/static/admin.css"></head><body>
-<header><div><strong>ADS-B Suite</strong><span>Webbeheer</span></div><nav><a href="/">Radar</a><button id="logout" hidden>Uitloggen</button></nav></header>
+<header><div><strong>ADS-B Suite</strong><span>Webbeheer</span></div><nav><a href="/">Radar</a><a href="/setup">Installatiewizard</a><button id="logout" hidden>Uitloggen</button></nav></header>
 <main>
 <section id="loginPanel" class="login"><form id="loginForm"><h1>Beheer aanmelden</h1><p>Gebruik het beheerderswachtwoord dat tijdens de installatie is getoond.</p><label>Wachtwoord<input id="password" type="password" required autofocus></label><button>Inloggen</button><p id="loginError" class="error"></p></form></section>
 <section id="app" hidden>
@@ -7,7 +7,7 @@
 <div class="cards" id="cards"></div>
 <div class="grid">
 <article><h2>Diensten</h2><div id="services"></div><div class="actions"><button data-action="restart-suite">ADS-B Suite herstarten</button><button data-action="restart-readsb">readsb herstarten</button></div></article>
-<article><h2>Onderhoud</h2><div class="actions vertical"><button data-action="update-database">Vliegtuigdatabase bijwerken</button><button data-action="update-suite">Software bijwerken</button><a class="button" href="/api/admin/backup">Back-up downloaden</a><button id="cleanup">Historie opschonen</button><button class="danger" data-action="reboot">Raspberry Pi herstarten</button></div></article>
+<article><h2>Onderhoud</h2><div class="actions vertical"><a class="button" href="/setup">Installatiewizard openen</a><button data-action="update-database">Vliegtuigdatabase bijwerken</button><button data-action="update-suite">Software bijwerken</button><a class="button" href="/api/admin/backup">Back-up downloaden</a><button id="cleanup">Historie opschonen</button><button class="danger" data-action="reboot">Raspberry Pi herstarten</button></div></article>
 <article class="wide"><h2>Configuratie</h2><form id="configForm" class="formgrid">
 <label>Receivernaam<input name="receiver_name"></label><label>Latitude<input name="receiver_lat" type="number" step="any"></label><label>Longitude<input name="receiver_lon" type="number" step="any"></label><label>Polling (seconden)<input name="poll_interval_seconds" type="number" step="0.1"></label><label>Historie-interval<input name="history_interval_seconds" type="number"></label><label>Bewaren (dagen)<input name="retention_days" type="number"></label><label>Track standaard (min)<input name="track_default_minutes" type="number"></label><label>Track maximum (uur)<input name="track_max_hours" type="number"></label><button>Opslaan</button></form><p class="hint">Na configuratiewijzigingen moet ADS-B Suite worden herstart.</p></article>
 <article><h2>Wachtwoord wijzigen</h2><form id="passwordForm"><label>Nieuw wachtwoord<input name="password" type="password" minlength="10" required></label><button>Wachtwoord opslaan</button></form></article>
