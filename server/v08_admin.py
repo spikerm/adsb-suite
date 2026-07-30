@@ -44,12 +44,22 @@ def _write_config(config_path, current):
     config_path.write_text(json.dumps(current, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 
 def _service_exists(name):
-    p = subprocess.run(['systemctl', 'list-unit-files', f'{name}.service', '--no-legend'], text=True, capture_output=True)
-    return p.returncode == 0 and f'{name}.service' in p.stdout
+    try:
+        p = subprocess.run(['systemctl', 'list-unit-files', f'{name}.service', '--no-legend'], text=True, capture_output=True, timeout=5)
+        return p.returncode == 0 and f'{name}.service' in p.stdout
+    except Exception:
+        return False
 
 def _service_active(name):
-    p = subprocess.run(['systemctl', 'is-active', name], text=True, capture_output=True)
-    return p.stdout.strip() == 'active'
+    try:
+        p = subprocess.run(['systemctl', 'is-active', name], text=True, capture_output=True, timeout=5)
+        return p.stdout.strip() == 'active'
+    except Exception:
+        return False
+
+def _safe_exists(path):
+    try: return Path(path).exists()
+    except (OSError, PermissionError): return False
 
 def register_admin(app, base, cfg, config_path, db_path, state, version):
     base, config_path, db_path = Path(base), Path(config_path), Path(db_path)
@@ -72,19 +82,32 @@ def register_admin(app, base, cfg, config_path, db_path, state, version):
     async def me(request): return web.json_response({'authenticated': _session(request), 'version': version, 'setup_complete': bool(cfg.get('setup_complete'))})
 
     async def diagnostics(request):
-        source = Path(str(cfg.get('source_file', '/run/readsb/aircraft.json')))
-        disk = shutil.disk_usage('/')
-        cert = Path('/etc/adsb-suite/tls/adsb-suite.crt')
-        checks = [
-            {'name':'ADS-B Suite service','ok':_service_active('adsb-suite'),'detail':'active' if _service_active('adsb-suite') else 'niet actief'},
-            {'name':'readsb service','ok':_service_active('readsb'),'detail':'active' if _service_active('readsb') else 'niet actief'},
-            {'name':'Live bronbestand','ok':source.exists() and time.time()-source.stat().st_mtime < 30 if source.exists() else False,'detail':str(source)},
-            {'name':'Vliegtuigdatabase','ok':Path('/usr/local/share/tar1090/aircraft.csv.gz').exists(),'detail':'tar1090 database'},
-            {'name':'HTTPS-certificaat','ok':cert.exists(),'detail':'poort 8443'},
-            {'name':'Schijfruimte','ok':disk.free > 512*1024*1024,'detail':f'{disk.free/1073741824:.1f} GB vrij'},
-        ]
-        failures=sum(not c['ok'] for c in checks)
-        return web.json_response({'overall':'ok' if failures==0 else 'warning' if failures<=2 else 'error','checks':checks,'timestamp':int(time.time())})
+        try:
+            source = Path(str(cfg.get('source_file', '/run/readsb/aircraft.json')))
+            try:
+                source_ok = source.exists() and time.time() - source.stat().st_mtime < 30
+            except OSError:
+                source_ok = False
+            try:
+                disk = shutil.disk_usage('/')
+                disk_ok = disk.free > 512 * 1024 * 1024
+                disk_detail = f'{disk.free / 1073741824:.1f} GB vrij'
+            except OSError as exc:
+                disk_ok, disk_detail = False, str(exc)
+            suite_active = await asyncio.to_thread(_service_active, 'adsb-suite')
+            readsb_active = await asyncio.to_thread(_service_active, 'readsb')
+            checks = [
+                {'name':'ADS-B Suite service','ok':suite_active,'detail':'active' if suite_active else 'niet actief'},
+                {'name':'readsb service','ok':readsb_active,'detail':'active' if readsb_active else 'niet actief'},
+                {'name':'Live bronbestand','ok':source_ok,'detail':str(source)},
+                {'name':'Vliegtuigdatabase','ok':_safe_exists('/usr/local/share/tar1090/aircraft.csv.gz'),'detail':'tar1090 database'},
+                {'name':'HTTPS-certificaat','ok':_safe_exists('/var/lib/adsb-suite/public/adsb-suite-ca.crt'),'detail':'poort 8443'},
+                {'name':'Schijfruimte','ok':disk_ok,'detail':disk_detail},
+            ]
+            failures = sum(not c['ok'] for c in checks)
+            return web.json_response({'overall':'ok' if failures == 0 else 'warning' if failures <= 2 else 'error','checks':checks,'timestamp':int(time.time())})
+        except Exception as exc:
+            return web.json_response({'overall':'error','checks':[{'name':'Diagnose','ok':False,'detail':f'{type(exc).__name__}: {exc}'}],'timestamp':int(time.time())}, status=200)
 
     async def overview(request):
         _require(request); disk = shutil.disk_usage('/'); db_size = db_path.stat().st_size if db_path.exists() else 0
@@ -104,9 +127,9 @@ def register_admin(app, base, cfg, config_path, db_path, state, version):
         _require(request); source = Path(str(cfg.get('source_file', '/run/readsb/aircraft.json')))
         checks = {
             'ADS-B Suite service': {'ok': _service_exists('adsb-suite')}, 'readsb service': {'ok': _service_exists('readsb')},
-            'tar1090 service': {'ok': _service_exists('tar1090')}, 'Live bronbestand': {'ok': source.exists(), 'detail': str(source)},
-            'Vliegtuigdatabase': {'ok': Path('/usr/local/share/tar1090/aircraft.csv.gz').exists()},
-            'HTTPS': {'ok': Path('/etc/adsb-suite/tls/adsb-suite.crt').exists(), 'detail':'https://<ip>:8443'},
+            'tar1090 service': {'ok': _service_exists('tar1090')}, 'Live bronbestand': {'ok': _safe_exists(source), 'detail': str(source)},
+            'Vliegtuigdatabase': {'ok': _safe_exists('/usr/local/share/tar1090/aircraft.csv.gz')},
+            'HTTPS': {'ok': _safe_exists('/var/lib/adsb-suite/public/adsb-suite-ca.crt'), 'detail':'https://<ip>:8443'},
         }
         return web.json_response({'complete': bool(cfg.get('setup_complete')), 'checks': checks, 'config': {k: cfg.get(k) for k in SETUP_CONFIG}})
 
