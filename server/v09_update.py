@@ -3,7 +3,9 @@ import asyncio
 import json
 import time
 import urllib.request
+from pathlib import Path
 from aiohttp import web
+from v10_replay import register_replay
 
 CACHE = {'ts': 0.0, 'data': None}
 
@@ -53,3 +55,4 @@ def register_update_api(app, version, cfg):
         return web.json_response(data, headers={'Cache-Control': 'no-store'})
 
     app.router.add_get('/api/update-status', update_status)
+    register_replay(app, Path(str(cfg.get('database_path') or '/var/lib/adsb-suite/adsb-suite.db')))
