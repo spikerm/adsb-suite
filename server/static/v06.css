@@ -1,0 +1,1 @@
+.v06-playback{display:flex;gap:8px;margin:10px 0 14px}.v06-playback button{flex:1;background:#10231e;border:1px solid var(--line);color:var(--text);padding:8px 10px;border-radius:8px;cursor:pointer}.v06-playback button:hover{border-color:var(--accent);color:var(--accent)}.selected-aircraft-halo{filter:drop-shadow(0 0 5px #37ed9b)}
