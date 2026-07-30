@@ -1,9 +1,10 @@
-"""ADS-B Suite v0.4 external enrichment with conservative caching."""
+"""ADS-B Suite external route and aircraft-photo enrichment with caching."""
 from __future__ import annotations
 
 import asyncio
 import time
 from typing import Any
+from urllib.parse import quote
 
 from aiohttp import ClientSession, ClientTimeout
 
@@ -16,8 +17,8 @@ def _clean_flight(value: Any) -> str:
 
 
 async def _get_json(url: str) -> dict[str, Any] | None:
-    timeout = ClientTimeout(total=8, connect=4)
-    headers = {"User-Agent": "ADS-B-Suite/0.4 (+local receiver dashboard)"}
+    timeout = ClientTimeout(total=10, connect=4)
+    headers = {"User-Agent": "ADS-B-Suite/0.6 (+local receiver dashboard)", "Accept": "application/json"}
     try:
         async with ClientSession(timeout=timeout, headers=headers) as session:
             async with session.get(url) as response:
@@ -33,16 +34,26 @@ def _photo(data: dict[str, Any] | None) -> dict[str, Any] | None:
     photos = (data or {}).get("photos")
     if not isinstance(photos, list) or not photos:
         return None
-    photo = photos[0] if isinstance(photos[0], dict) else {}
-    thumb = photo.get("thumbnail_large") or photo.get("thumbnail") or {}
-    image = thumb.get("src") if isinstance(thumb, dict) else None
-    if not image:
-        return None
-    return {
-        "image": image,
-        "link": photo.get("link"),
-        "photographer": photo.get("photographer"),
-    }
+    for candidate in photos:
+        if not isinstance(candidate, dict):
+            continue
+        image = None
+        for key in ("thumbnail_large", "thumbnail", "thumbnail_small"):
+            thumb = candidate.get(key)
+            if isinstance(thumb, dict) and thumb.get("src"):
+                image = thumb["src"]
+                break
+            if isinstance(thumb, str) and thumb:
+                image = thumb
+                break
+        image = image or candidate.get("image") or candidate.get("src")
+        if image:
+            return {
+                "image": image,
+                "link": candidate.get("link") or candidate.get("url"),
+                "photographer": candidate.get("photographer"),
+            }
+    return None
 
 
 def _route(data: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -58,49 +69,31 @@ def _route(data: dict[str, Any] | None) -> dict[str, Any] | None:
     return {
         "callsign": flight.get("callsign"),
         "number": flight.get("callsign_icao") or flight.get("callsign_iata"),
-        "origin": {
-            "icao": origin.get("icao_code"),
-            "iata": origin.get("iata_code"),
-            "name": origin.get("name"),
-            "municipality": origin.get("municipality"),
-            "country": origin.get("country_name"),
-        },
-        "destination": {
-            "icao": destination.get("icao_code"),
-            "iata": destination.get("iata_code"),
-            "name": destination.get("name"),
-            "municipality": destination.get("municipality"),
-            "country": destination.get("country_name"),
-        },
-        "airline": {
-            "name": airline.get("name"),
-            "icao": airline.get("icao"),
-            "iata": airline.get("iata"),
-            "country": airline.get("country"),
-        },
+        "origin": {"icao": origin.get("icao_code"), "iata": origin.get("iata_code"), "name": origin.get("name"), "municipality": origin.get("municipality"), "country": origin.get("country_name")},
+        "destination": {"icao": destination.get("icao_code"), "iata": destination.get("iata_code"), "name": destination.get("name"), "municipality": destination.get("municipality"), "country": destination.get("country_name")},
+        "airline": {"name": airline.get("name"), "icao": airline.get("icao"), "iata": airline.get("iata"), "country": airline.get("country")},
     }
 
 
 async def enrich_aircraft(aircraft: dict[str, Any]) -> dict[str, Any]:
     hx = str(aircraft.get("hex") or "").strip().lower()
+    registration = str(aircraft.get("registration") or aircraft.get("r") or "").strip().upper()
     flight = _clean_flight(aircraft.get("flight"))
-    key = f"{hx}:{flight}"
+    key = f"{hx}:{registration}:{flight}"
     cached = _CACHE.get(key)
     if cached and cached[0] > time.time():
         return cached[1]
 
-    photo_url = f"https://api.planespotters.net/pub/photos/hex/{hx}" if hx else ""
-    route_url = f"https://api.adsbdb.com/v0/callsign/{flight}" if flight else ""
+    route_url = f"https://api.adsbdb.com/v0/callsign/{quote(flight)}" if flight else ""
+    hex_url = f"https://api.planespotters.net/pub/photos/hex/{quote(hx)}" if hx else ""
     photo_data, route_data = await asyncio.gather(
-        _get_json(photo_url) if photo_url else asyncio.sleep(0, result=None),
+        _get_json(hex_url) if hex_url else asyncio.sleep(0, result=None),
         _get_json(route_url) if route_url else asyncio.sleep(0, result=None),
     )
-    result = {
-        "hex": hx,
-        "flight": flight or None,
-        "photo": _photo(photo_data),
-        "route": _route(route_data),
-        "updated_at": int(time.time()),
-    }
+    photo = _photo(photo_data)
+    if photo is None and registration:
+        photo = _photo(await _get_json(f"https://api.planespotters.net/pub/photos/reg/{quote(registration)}"))
+
+    result = {"hex": hx, "flight": flight or None, "registration": registration or None, "photo": photo, "route": _route(route_data), "updated_at": int(time.time())}
     _CACHE[key] = (time.time() + _TTL, result)
     return result
