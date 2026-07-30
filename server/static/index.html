@@ -1,11 +1,17 @@
 <!doctype html><html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ADS-B Suite</title><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"><link rel="stylesheet" href="/static/style.css"></head>
 <body><header><div><strong>ADS-B Suite</strong><span id="version"></span></div><div id="clock"></div></header>
-<nav><button data-view="radar" class="active">Radar</button><button data-view="list">Vliegtuigen</button><button data-view="stats">Statistieken</button><a href="/api/export.csv?hours=24">CSV 24 uur</a></nav>
+<nav><button data-view="radar" class="active">Radar</button><button data-view="list">Vliegtuigen</button><button data-view="stats">Statistieken</button><button id="toggleLabels">Labels aan</button><a href="/api/export.csv?hours=24">CSV 24 uur</a></nav>
 <main>
-<section class="cards"><article><small>Status</small><b id="status">Laden…</b></article><article><small>Live vliegtuigen</small><b id="count">–</b></article><article><small>Dichtstbij</small><b id="nearest">–</b></article><article><small>Observaties</small><b id="observations">–</b></article></section>
-<section id="radar" class="view active"><div id="map"></div><aside id="detail"><h2>Selecteer een vliegtuig</h2><p>Klik op een vliegtuig op de kaart.</p></aside></section>
-<section id="list" class="view"><div class="toolbar"><input id="filter" placeholder="Zoek callsign, registratie, hex of type"></div><div class="table-wrap"><table><thead><tr><th>Callsign</th><th>Registratie</th><th>Type</th><th>Hoogte</th><th>Snelheid</th><th>Afstand</th></tr></thead><tbody id="aircraftRows"></tbody></table></div></section>
-<section id="stats" class="view"><div class="stats-grid"><article><h2>Afgelopen 24 uur</h2><dl id="summary"></dl></article><article><h2>Top vliegtuigen</h2><div class="table-wrap"><table><thead><tr><th>Hex</th><th>Callsign</th><th>Waarnemingen</th><th>Min. afstand</th></tr></thead><tbody id="topRows"></tbody></table></div></article></div></section>
+<section class="cards"><article><small>Status</small><b id="status">Laden…</b></article><article><small>Live vliegtuigen</small><b id="count">–</b></article><article><small>Dichtstbij</small><b id="nearest">–</b></article><article><small>Berichten/s</small><b id="mps">–</b></article><article><small>Observaties</small><b id="observations">–</b></article></section>
+<section id="radar" class="view active"><div id="map"></div><aside id="detail"><h2>Selecteer een vliegtuig</h2><p>Klik op een vliegtuig op de kaart.</p><div class="altitude-legend"><span class="alt-low">● &lt;3.000 ft</span><span class="alt-medium">● 3–10k</span><span class="alt-high">● 10–25k</span><span class="alt-cruise">● &gt;25k</span></div></aside></section>
+<section id="list" class="view"><div class="toolbar"><input id="filter" placeholder="Zoek callsign, registratie, operator, model, land of HEX"></div><div class="table-wrap"><table><thead><tr><th>Callsign</th><th>Registratie</th><th>Model/type</th><th>Operator</th><th>Hoogte</th><th>Snelheid</th><th>Afstand</th></tr></thead><tbody id="aircraftRows"></tbody></table></div></section>
+<section id="stats" class="view"><div class="stats-grid">
+<article><h2>Afgelopen 24 uur</h2><dl id="summary"></dl></article>
+<article><h2>Raspberry Pi</h2><dl id="systemSummary"></dl></article>
+<article class="wide"><h2>Top vliegtuigen</h2><div class="table-wrap"><table><thead><tr><th>HEX</th><th>Callsign</th><th>Registratie</th><th>Model/type</th><th>Waarnemingen</th><th>Min. afstand</th></tr></thead><tbody id="topRows"></tbody></table></div></article>
+<article><h2>Top operators</h2><div class="table-wrap"><table><thead><tr><th>Operator</th><th>Toestellen</th><th>Waarnemingen</th></tr></thead><tbody id="operatorRows"></tbody></table></div></article>
+<article><h2>Top typen</h2><div class="table-wrap"><table><thead><tr><th>Type/model</th><th>Toestellen</th><th>Waarnemingen</th></tr></thead><tbody id="typeRows"></tbody></table></div></article>
+</div></section>
 </main><footer><span id="source"></span><span id="updated"></span></footer>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script><script src="/static/app.js"></script></body></html>
