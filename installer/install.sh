@@ -2,15 +2,23 @@
 set -euo pipefail
 [ "$EUID" -eq 0 ] || { echo "Gebruik: sudo ./installer/install.sh"; exit 1; }
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
-echo "ADS-B Suite v0.2.0 installeren/upgraden…"
+echo "ADS-B Suite v0.3.0-beta1 installeren/upgraden…"
 apt-get update
 apt-get install -y python3 python3-venv curl
-id adsbsuite >/dev/null 2>&1 || useradd --system --home /opt/adsb-suite --shell /usr/sbin/nologin adsbsuite
-# Let the service read /run/readsb even on installations where the directory is group restricted.
+if ! getent group adsbsuite >/dev/null; then groupadd --system adsbsuite; fi
+if ! id adsbsuite >/dev/null 2>&1; then
+  useradd --system --gid adsbsuite --home-dir /opt/adsb-suite --no-create-home --shell /usr/sbin/nologin adsbsuite
+else
+  usermod -g adsbsuite adsbsuite
+fi
+# Voeg de servicegebruiker alleen toe aan readsb wanneer die groep echt bestaat.
 if getent group readsb >/dev/null; then usermod -a -G readsb adsbsuite; fi
 systemctl disable --now adsb-homey-api.service 2>/dev/null || true
 systemctl stop adsb-suite.service 2>/dev/null || true
 mkdir -p /opt/adsb-suite /etc/adsb-suite /var/lib/adsb-suite
+if [ -f /etc/adsb-suite/config.json ]; then
+  cp -a /etc/adsb-suite/config.json "/etc/adsb-suite/config.json.bak-$(date +%Y%m%d-%H%M%S)"
+fi
 rm -rf /opt/adsb-suite/server
 cp -a "$SRC/server" /opt/adsb-suite/
 python3 -m venv /opt/adsb-suite/venv
@@ -25,7 +33,10 @@ p=sys.argv[1]
 with open(p,encoding='utf-8') as f: c=json.load(f)
 c.pop('source_url',None)
 c.setdefault('source_file','/run/readsb/aircraft.json')
+c.setdefault('receiver_name','Papendrecht ADS-B')
 c.setdefault('aircraft_database_path','/var/lib/adsb-suite/aircraft.csv')
+c.setdefault('track_default_minutes',30)
+c.setdefault('track_max_hours',24)
 with open(p,'w',encoding='utf-8') as f: json.dump(c,f,indent=2); f.write('\n')
 PY
 fi
@@ -37,6 +48,7 @@ chmod 750 /etc/adsb-suite
 chmod 640 /etc/adsb-suite/config.json
 chmod 644 /var/lib/adsb-suite/aircraft.csv
 systemctl daemon-reload
+systemctl reset-failed adsb-suite.service 2>/dev/null || true
 systemctl enable --now adsb-suite.service
 sleep 2
 systemctl --no-pager --full status adsb-suite.service || true
@@ -44,4 +56,5 @@ IP=$(hostname -I | awk '{print $1}')
 echo
 echo "Dashboard: http://${IP}:8090/"
 echo "API:       http://${IP}:8090/api/status"
+echo "Tracks:    http://${IP}:8090/api/track/<hex>?minutes=30"
 echo "Log:       sudo journalctl -u adsb-suite -f"
