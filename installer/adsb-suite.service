@@ -7,7 +7,6 @@ Wants=network-online.target
 Type=simple
 User=adsbsuite
 Group=adsbsuite
-SupplementaryGroups=readsb
 Environment=ADSB_SUITE_CONFIG=/etc/adsb-suite/config.json
 WorkingDirectory=/opt/adsb-suite/server
 ExecStart=/opt/adsb-suite/venv/bin/python /opt/adsb-suite/server/adsb_suite.py
