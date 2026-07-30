@@ -2,7 +2,7 @@
 set -euo pipefail
 [ "$EUID" -eq 0 ] || { echo "Gebruik: sudo ./installer/install.sh"; exit 1; }
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
-echo "ADS-B Suite v0.3.0-beta2 installeren/upgraden…"
+echo "ADS-B Suite v0.4.0 installeren/upgraden…"
 apt-get update
 apt-get install -y python3 python3-venv curl gzip
 
@@ -22,9 +22,6 @@ if [ -f /etc/adsb-suite/config.json ]; then
   cp -a /etc/adsb-suite/config.json "/etc/adsb-suite/config.json.bak-$(date +%Y%m%d-%H%M%S)"
 fi
 
-# Volledige tar1090/readsb vliegtuigdatabase. Hiermee voegt readsb onder andere
-# registratie (r), ICAO-type (t), lange omschrijving (desc), eigenaar/operator
-# (ownOp), bouwjaar en databasevlaggen toe aan aircraft.json.
 DB_URL="https://github.com/wiedehopf/tar1090-db/raw/csv/aircraft.csv.gz"
 DB_FILE="/usr/local/share/tar1090/aircraft.csv.gz"
 DB_TMP="${DB_FILE}.new"
@@ -39,40 +36,28 @@ else
   echo "Download mislukt; bestaande vliegtuigdatabase blijft in gebruik."
 fi
 
-# Zorg dat readsb de database werkelijk gebruikt. De standaard Debian/readsb
-# service leest DECODER_OPTIONS uit /etc/default/readsb.
 if [ -f /etc/default/readsb ]; then
   cp -a /etc/default/readsb "/etc/default/readsb.bak-adsbsuite-$(date +%Y%m%d-%H%M%S)"
   python3 - /etc/default/readsb "$DB_FILE" <<'PY'
 from pathlib import Path
 import re, shlex, sys
-p = Path(sys.argv[1])
-db = sys.argv[2]
+p = Path(sys.argv[1]); db = sys.argv[2]
 s = p.read_text(encoding='utf-8')
 m = re.search(r'(?m)^DECODER_OPTIONS=(.*)$', s)
 raw = m.group(1).strip() if m else '""'
-try:
-    value = shlex.split(raw)[0] if raw else ''
-except ValueError:
-    value = raw.strip('"\'')
-args = shlex.split(value)
-clean = []
-skip = False
+try: value = shlex.split(raw)[0] if raw else ''
+except ValueError: value = raw.strip('"\'')
+args = shlex.split(value); clean = []; skip = False
 for arg in args:
     if arg.startswith('--db-file=') or arg == '--db-file' or arg == '--db-file-lt':
-        skip = arg == '--db-file'
-        continue
-    if skip:
-        skip = False
-        continue
+        skip = arg == '--db-file'; continue
+    if skip: skip = False; continue
     clean.append(arg)
 clean += [f'--db-file={db}', '--db-file-lt']
 quoted = '"' + ' '.join(clean).replace('\\', '\\\\').replace('"', '\\"') + '"'
 line = f'DECODER_OPTIONS={quoted}'
-if m:
-    s = s[:m.start()] + line + s[m.end():]
-else:
-    s += ('\n' if s and not s.endswith('\n') else '') + line + '\n'
+if m: s = s[:m.start()] + line + s[m.end():]
+else: s += ('\n' if s and not s.endswith('\n') else '') + line + '\n'
 p.write_text(s, encoding='utf-8')
 PY
   systemctl restart readsb.service 2>/dev/null || systemctl restart readsb 2>/dev/null || true
@@ -84,16 +69,22 @@ fi
 rm -rf /opt/adsb-suite/server
 cp -a "$SRC/server" /opt/adsb-suite/
 
-# readsb gebruikt `type` voor de databron (zoals adsb_icao), niet als ICAO-type.
-# Gebruik daarnaast de metadata die --db-file-lt aan aircraft.json toevoegt.
 python3 - /opt/adsb-suite/server/adsb_suite.py <<'PY'
 from pathlib import Path
 import sys
 p = Path(sys.argv[1])
 s = p.read_text(encoding='utf-8')
+s = s.replace('"0.3.0-beta2"', '"0.4.0"')
 s = s.replace(', metadata.get("icao_type"), item.get("type"))', ', metadata.get("icao_type"))')
 s = s.replace('"description": first_text(metadata.get("description"), model),', '"description": first_text(item.get("desc"), metadata.get("description"), model),')
 s = s.replace('"operator": first_text(metadata.get("operator"), metadata.get("owner"), metadata.get("airline")),', '"operator": first_text(item.get("ownOp"), metadata.get("operator"), metadata.get("owner"), metadata.get("airline")),')
+if 'from v04_enrichment import enrich_aircraft' not in s:
+    s = s.replace('from aiohttp import WSMsgType, web', 'from aiohttp import WSMsgType, web\nfrom v04_enrichment import enrich_aircraft')
+handler = '''\n\nasync def api_enrichment(request: web.Request) -> web.Response:\n    hx = request.match_info["hex"].strip().lower()\n    aircraft = next((a for a in state["aircraft"] if a.get("hex") == hx), None)\n    if aircraft is None:\n        with dbconn() as conn:\n            row = conn.execute("SELECT * FROM seen_aircraft WHERE hex=?", (hx,)).fetchone()\n        aircraft = dict(row) if row else {"hex": hx, "flight": request.query.get("flight")}\n    elif request.query.get("flight"):\n        aircraft = {**aircraft, "flight": request.query.get("flight")}\n    return web.json_response(await enrich_aircraft(aircraft), headers={"Cache-Control": "no-store"})\n'''
+if 'async def api_enrichment' not in s:
+    s = s.replace('\n\nasync def api_status', handler + '\n\nasync def api_status')
+if '/api/enrichment/{hex}' not in s:
+    s = s.replace('app.router.add_get("/api/track/{hex}", api_track)', 'app.router.add_get("/api/track/{hex}", api_track)\napp.router.add_get("/api/enrichment/{hex}", api_enrichment)')
 p.write_text(s, encoding='utf-8')
 PY
 
@@ -134,8 +125,8 @@ sleep 3
 systemctl --no-pager --full status adsb-suite.service || true
 IP=$(hostname -I | awk '{print $1}')
 echo
-echo "Dashboard: http://${IP}:8090/"
-echo "API:       http://${IP}:8090/api/status"
-echo "Tracks:    http://${IP}:8090/api/track/<hex>?minutes=30"
-echo "Database:  $DB_FILE"
-echo "Log:       sudo journalctl -u adsb-suite -f"
+echo "Dashboard:  http://${IP}:8090/"
+echo "API:        http://${IP}:8090/api/status"
+echo "Verrijking: http://${IP}:8090/api/enrichment/<hex>?flight=<callsign>"
+echo "Database:   $DB_FILE"
+echo "Log:        sudo journalctl -u adsb-suite -f"
