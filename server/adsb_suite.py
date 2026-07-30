@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ADS-B Suite v0.2.0: readsb ingest, SQLite history, REST, WebSocket and dashboard."""
+"""ADS-B Suite v0.3.0 beta 1: readsb ingest, history, tracks, REST, WebSocket and dashboard."""
 import asyncio
 import csv
 import io
@@ -13,7 +13,7 @@ from typing import Any
 
 from aiohttp import WSMsgType, web
 
-VERSION = "0.2.0"
+VERSION = "0.3.0-beta1"
 BASE = Path(__file__).resolve().parent
 CONFIG_PATH = Path(os.environ.get("ADSB_SUITE_CONFIG", "/etc/adsb-suite/config.json"))
 DEFAULT: dict[str, Any] = {
@@ -22,9 +22,12 @@ DEFAULT: dict[str, Any] = {
     "source_file": "/run/readsb/aircraft.json",
     "receiver_lat": 51.843,
     "receiver_lon": 4.690,
+    "receiver_name": "ADS-B Receiver",
     "poll_interval_seconds": 2,
     "history_interval_seconds": 10,
     "retention_days": 90,
+    "track_default_minutes": 30,
+    "track_max_hours": 24,
     "database_path": "/var/lib/adsb-suite/adsb-suite.db",
     "aircraft_database_path": "/var/lib/adsb-suite/aircraft.csv",
 }
@@ -51,6 +54,9 @@ state: dict[str, Any] = {
     "source_ok": False,
     "source_error": None,
     "messages": 0,
+    "last_messages": 0,
+    "last_message_ts": 0.0,
+    "messages_per_second": 0.0,
 }
 websockets: set[web.WebSocketResponse] = set()
 aircraft_db: dict[str, dict[str, str]] = {}
@@ -111,7 +117,6 @@ def init_db() -> None:
             );
             """
         )
-        # Safe migration from v0.1 databases.
         columns = {row[1] for row in conn.execute("PRAGMA table_info(observations)")}
         for name in ("description", "operator"):
             if name not in columns:
@@ -141,7 +146,7 @@ def finite_number(value: Any) -> float | None:
     return None
 
 
-def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+def haversine(lat1: float, lon1: float, lon2: float, lat2: float) -> float:
     radius = 6371.0
     p1, p2 = math.radians(lat1), math.radians(lat2)
     dp, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
@@ -173,7 +178,7 @@ def normalize(payload: dict[str, Any]) -> list[dict[str, Any]]:
         speed = finite_number(item.get("gs")) or finite_number(item.get("tas"))
         track = finite_number(item.get("track")) or finite_number(item.get("true_heading"))
         vertical_rate = finite_number(item.get("baro_rate")) or finite_number(item.get("geom_rate"))
-        distance = haversine(float(CFG["receiver_lat"]), float(CFG["receiver_lon"]), lat, lon)
+        distance = haversine(float(CFG["receiver_lat"]), float(CFG["receiver_lon"]), lon, lat)
         row = dict(item)
         row.update(
             {
@@ -200,7 +205,6 @@ def normalize(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def read_source_sync() -> dict[str, Any]:
-    # readsb replaces this file frequently. Retrying handles the tiny replacement window.
     error: Exception | None = None
     for _ in range(3):
         try:
@@ -220,9 +224,14 @@ def snapshot(include_aircraft: bool = True) -> dict[str, Any]:
         "source_ok": state["source_ok"],
         "source_error": state["source_error"],
         "messages": state["messages"],
+        "messages_per_second": round(float(state["messages_per_second"]), 1),
         "count": len(aircraft),
         "positioned_count": len(aircraft),
-        "receiver": {"lat": CFG["receiver_lat"], "lon": CFG["receiver_lon"]},
+        "receiver": {
+            "name": CFG["receiver_name"],
+            "lat": CFG["receiver_lat"],
+            "lon": CFG["receiver_lon"],
+        },
         "nearest": aircraft[0] if aircraft else None,
     }
     if include_aircraft:
@@ -246,9 +255,16 @@ async def poller(_: web.Application) -> None:
     while True:
         try:
             payload = await asyncio.to_thread(read_source_sync)
+            messages = int(payload.get("messages") or 0)
+            now = time.monotonic()
+            if state["last_message_ts"] and messages >= state["last_messages"]:
+                elapsed = max(now - float(state["last_message_ts"]), 0.001)
+                state["messages_per_second"] = (messages - int(state["last_messages"])) / elapsed
+            state["last_messages"] = messages
+            state["last_message_ts"] = now
+            state["messages"] = messages
             state["aircraft"] = normalize(payload)
             state["source_generated_at"] = int(payload.get("now") or 0)
-            state["messages"] = int(payload.get("messages") or 0)
             state.update(updated_at=int(time.time()), source_ok=True, source_error=None)
             await broadcast({"type": "aircraft", "data": snapshot()})
         except Exception as exc:
@@ -345,6 +361,21 @@ async def api_nearest(_: web.Request) -> web.Response:
     return web.json_response({"nearest": snapshot(False)["nearest"]})
 
 
+async def api_receiver(_: web.Request) -> web.Response:
+    aircraft = state["aircraft"]
+    max_range = max((float(a.get("distance_km") or 0) for a in aircraft), default=0.0)
+    return web.json_response({
+        "receiver": snapshot(False)["receiver"],
+        "source_ok": state["source_ok"],
+        "source_file": str(SOURCE),
+        "messages": state["messages"],
+        "messages_per_second": round(float(state["messages_per_second"]), 1),
+        "live_aircraft": len(aircraft),
+        "current_max_range_km": round(max_range, 1),
+        "updated_at": state["updated_at"],
+    })
+
+
 async def api_history(request: web.Request) -> web.Response:
     hours = query_int(request, "hours", 24, 1, 24 * 365)
     limit = query_int(request, "limit", 5000, 1, 20000)
@@ -361,11 +392,48 @@ async def api_history(request: web.Request) -> web.Response:
     return web.json_response({"count": len(rows), "hours": hours, "observations": rows})
 
 
+async def api_track(request: web.Request) -> web.Response:
+    hx = request.match_info["hex"].strip().lower()
+    minutes = query_int(request, "minutes", int(CFG["track_default_minutes"]), 1, int(CFG["track_max_hours"]) * 60)
+    limit = query_int(request, "limit", 2000, 10, 10000)
+    since = int(time.time()) - minutes * 60
+    with dbconn() as conn:
+        summary = conn.execute("SELECT * FROM seen_aircraft WHERE hex=?", (hx,)).fetchone()
+        rows = [dict(row) for row in conn.execute(
+            """SELECT ts,lat,lon,altitude_ft,speed_kt,track_deg,vertical_rate_fpm,distance_km
+               FROM observations
+               WHERE hex=? AND ts>=? AND lat IS NOT NULL AND lon IS NOT NULL
+               ORDER BY ts ASC LIMIT ?""",
+            (hx, since, limit),
+        )]
+    if not summary and not rows:
+        return web.json_response({"error": "not_found", "hex": hx}, status=404)
+    distance = 0.0
+    for previous, current in zip(rows, rows[1:]):
+        distance += haversine(float(previous["lat"]), float(previous["lon"]), float(current["lon"]), float(current["lat"]))
+    altitudes = [float(row["altitude_ft"]) for row in rows if row["altitude_ft"] is not None]
+    speeds = [float(row["speed_kt"]) for row in rows if row["speed_kt"] is not None]
+    return web.json_response({
+        "hex": hx,
+        "minutes": minutes,
+        "count": len(rows),
+        "aircraft": dict(summary) if summary else None,
+        "summary": {
+            "distance_km": round(distance, 2),
+            "max_altitude_ft": max(altitudes) if altitudes else None,
+            "average_speed_kt": round(sum(speeds) / len(speeds), 1) if speeds else None,
+            "first_ts": rows[0]["ts"] if rows else None,
+            "last_ts": rows[-1]["ts"] if rows else None,
+        },
+        "points": rows,
+    }, headers={"Cache-Control": "no-store"})
+
+
 async def api_stats(_: web.Request) -> web.Response:
     since = int(time.time()) - 86400
     with dbconn() as conn:
         summary = dict(conn.execute(
-            "SELECT COUNT(*) observations,COUNT(DISTINCT hex) unique_aircraft,MIN(distance_km) min_distance_km,MAX(altitude_ft) max_altitude_ft,MAX(speed_kt) max_speed_kt FROM observations WHERE ts>=?",
+            "SELECT COUNT(*) observations,COUNT(DISTINCT hex) unique_aircraft,MIN(distance_km) min_distance_km,MAX(distance_km) max_distance_km,MAX(altitude_ft) max_altitude_ft,MAX(speed_kt) max_speed_kt FROM observations WHERE ts>=?",
             (since,),
         ).fetchone())
         hourly = [dict(row) for row in conn.execute(
@@ -376,6 +444,18 @@ async def api_stats(_: web.Request) -> web.Response:
             "SELECT hex,flight,registration,aircraft_type,operator,observations,min_distance_km,last_seen FROM seen_aircraft ORDER BY observations DESC LIMIT 20"
         )]
     return web.json_response({"period": "24h", "summary": summary, "hourly": hourly, "top_aircraft": top})
+
+
+async def api_live_stats(_: web.Request) -> web.Response:
+    aircraft = state["aircraft"]
+    return web.json_response({
+        "live_aircraft": len(aircraft),
+        "messages": state["messages"],
+        "messages_per_second": round(float(state["messages_per_second"]), 1),
+        "nearest_distance_km": aircraft[0]["distance_km"] if aircraft else None,
+        "maximum_range_km": max((float(a.get("distance_km") or 0) for a in aircraft), default=None),
+        "updated_at": state["updated_at"],
+    })
 
 
 async def api_search(request: web.Request) -> web.Response:
@@ -470,8 +550,11 @@ app.router.add_get("/health", health)
 app.router.add_get("/api/status", api_status)
 app.router.add_get("/api/aircraft", api_aircraft)
 app.router.add_get("/api/nearest", api_nearest)
+app.router.add_get("/api/receiver", api_receiver)
 app.router.add_get("/api/history", api_history)
 app.router.add_get("/api/history/stats", api_stats)
+app.router.add_get("/api/statistics/live", api_live_stats)
+app.router.add_get("/api/track/{hex}", api_track)
 app.router.add_get("/api/search", api_search)
 app.router.add_get("/api/aircraft/{hex}", api_aircraft_hex)
 app.router.add_get("/api/export.csv", api_export_csv)
