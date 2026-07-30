@@ -1,6 +1,6 @@
-# ADS-B Suite v0.7
+# ADS-B Suite v0.8
 
-Lokale ADS-B backend en webdashboard voor `readsb`, met live radar, vluchtinformatie, historische tracks, statistieken, analyse, filters en waarschuwingen.
+Lokale ADS-B backend en webdashboard voor `readsb`, met live radar, vluchtinformatie, historische tracks, statistieken, analyse, filters, waarschuwingen en een beveiligde webbeheeromgeving.
 
 ## Installeren met één commando
 
@@ -10,28 +10,43 @@ Op Raspberry Pi OS of Debian/Ubuntu:
 curl -fsSL https://raw.githubusercontent.com/spikerm/adsb-suite/main/install.sh | sudo bash
 ```
 
-Alternatief met `wget`:
+Testversie V0.8 installeren:
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/spikerm/adsb-suite/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/spikerm/adsb-suite/feature/v0.8-webadmin/install.sh \
+  | sudo ADSB_SUITE_REF=feature/v0.8-webadmin bash
 ```
 
-De installer controleert de benodigde pakketten, downloadt de repository naar `/opt/adsb-suite-src`, voert de interne installer uit en installeert beheercommando's.
+De installer toont bij een nieuwe installatie één keer een willekeurig beheerderswachtwoord. Bewaar dit wachtwoord.
 
 Open daarna:
 
 ```text
-http://<IP-VAN-DE-PI>:8090/
+Radar:      http://<IP-VAN-DE-PI>:8090/
+Webbeheer:  http://<IP-VAN-DE-PI>:8090/admin
 ```
 
-## Testversie of andere branch installeren
+## Webbeheer V0.8
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/spikerm/adsb-suite/feature/v0.7/install.sh \
-  | sudo ADSB_SUITE_REF=feature/v0.7 bash
-```
+De beheeromgeving bevat:
 
-## Beheer
+- login met PBKDF2-wachtwoordhash en beveiligde sessiecookie;
+- status van ADS-B Suite, readsb en tar1090;
+- live vliegtuigen, berichten per seconde, CPU-temperatuur, load, schijf- en databasegebruik;
+- receivernaam en antennecoördinaten wijzigen;
+- polling, historie, bewaartermijn en trackinstellingen wijzigen;
+- ADS-B Suite en readsb herstarten;
+- Raspberry Pi herstarten met bevestiging;
+- vliegtuigdatabase bijwerken;
+- software-update starten;
+- logboeken van ADS-B Suite, readsb en tar1090 bekijken;
+- configuratie en database als back-up downloaden;
+- oude historie verwijderen en SQLite opschonen;
+- beheerderswachtwoord wijzigen.
+
+Systeemacties lopen via een beperkt root-helperprogramma en een afzonderlijke sudoers-regel. De webservice krijgt geen algemene rootrechten.
+
+## Beheer via SSH
 
 ```bash
 sudo adsb-suite-update
@@ -46,6 +61,7 @@ sudo adsb-suite-uninstall
 ```bash
 git clone https://github.com/spikerm/adsb-suite.git
 cd adsb-suite
+git checkout feature/v0.8-webadmin
 sudo ./installer/install.sh
 ```
 
@@ -61,8 +77,7 @@ sudo ./installer/install.sh
 - Live radar en vliegtuiglijst
 - Registratie, type, model, operator en route
 - Vliegtuigfoto's met fallback
-- Tracks van 5, 30 en 60 minuten met playback
-- Hoogte- en snelheidsprofielen
+- Tracks met playback en hoogte-/snelheidsprofielen
 - OpenStreetMap, topografische en satellietkaart
 - Ontvangstanalyse en polarplot
 - Filters voor heavies, helikopters, militair verkeer en noodsituaties
@@ -70,6 +85,7 @@ sudo ./installer/install.sh
 - Browsermeldingen en lokale waarschuwingen
 - SQLite-historie, statistieken en CSV-export
 - Raspberry Pi-systeemstatus
+- Beveiligd webbeheer op `/admin`
 
 ## Belangrijkste endpoints
 
@@ -82,6 +98,7 @@ sudo ./installer/install.sh
 - `/api/history/stats`
 - `/api/search?q=KLM`
 - `/api/export.csv?hours=24`
+- `/api/admin/me`
 - `/live`
 - `/health`
 
@@ -91,5 +108,3 @@ sudo ./installer/install.sh
 sudo adsb-suite-doctor
 sudo journalctl -u adsb-suite -n 100 --no-pager
 ```
-
-De doctor controleert onder andere Python, readsb, `aircraft.json`, de systemd-service, configuratie, vliegtuigdatabase en de lokale API.
