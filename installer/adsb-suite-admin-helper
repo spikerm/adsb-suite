@@ -15,7 +15,18 @@ case "$ACTION" in
     echo "Vliegtuigdatabase bijgewerkt."
     ;;
   update-suite)
-    ADSB_SUITE_REF="${ADSB_SUITE_REF:-feature/v0.8-webadmin}" /usr/local/bin/adsb-suite-update
+    updater="$(command -v adsb-suite-update 2>/dev/null || true)"
+    if [ -z "$updater" ]; then
+      for candidate in /usr/local/sbin/adsb-suite-update /usr/local/bin/adsb-suite-update /opt/adsb-suite-src/update.sh; do
+        if [ -x "$candidate" ]; then updater="$candidate"; break; fi
+      done
+    fi
+    if [ -z "$updater" ]; then
+      echo "Updatescript adsb-suite-update is niet gevonden." >&2
+      exit 1
+    fi
+    echo "Software-update starten via $updater"
+    ADSB_SUITE_REF="${ADSB_SUITE_REF:-feature/v0.8-webadmin}" "$updater"
     ;;
   logs)
     case "$ARG" in adsb-suite|readsb|tar1090) journalctl -u "$ARG" -n 250 --no-pager;; *) exit 2;; esac
