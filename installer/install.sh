@@ -2,7 +2,7 @@
 set -euo pipefail
 [ "$EUID" -eq 0 ] || { echo "Gebruik: sudo ./installer/install.sh"; exit 1; }
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
-echo "ADS-B Suite v0.3.0-beta1 installeren/upgraden…"
+echo "ADS-B Suite v0.3.0-beta2 installeren/upgraden…"
 apt-get update
 apt-get install -y python3 python3-venv curl
 if ! getent group adsbsuite >/dev/null; then groupadd --system adsbsuite; fi
@@ -11,7 +11,6 @@ if ! id adsbsuite >/dev/null 2>&1; then
 else
   usermod -g adsbsuite adsbsuite
 fi
-# Voeg de servicegebruiker alleen toe aan readsb wanneer die groep echt bestaat.
 if getent group readsb >/dev/null; then usermod -a -G readsb adsbsuite; fi
 systemctl disable --now adsb-homey-api.service 2>/dev/null || true
 systemctl stop adsb-suite.service 2>/dev/null || true
@@ -21,6 +20,15 @@ if [ -f /etc/adsb-suite/config.json ]; then
 fi
 rm -rf /opt/adsb-suite/server
 cp -a "$SRC/server" /opt/adsb-suite/
+# readsb gebruikt `type` voor de bron van het bericht (bijv. adsb_icao), niet voor het vliegtuigtype.
+# Verwijder daarom deze onjuiste fallback; ICAO-type komt uit `t` of de aircraft-database.
+python3 - /opt/adsb-suite/server/adsb_suite.py <<'PY'
+from pathlib import Path
+p = Path(__import__('sys').argv[1])
+s = p.read_text(encoding='utf-8')
+s = s.replace(', metadata.get("icao_type"), item.get("type"))', ', metadata.get("icao_type"))')
+p.write_text(s, encoding='utf-8')
+PY
 python3 -m venv /opt/adsb-suite/venv
 /opt/adsb-suite/venv/bin/pip install --upgrade pip
 /opt/adsb-suite/venv/bin/pip install -r /opt/adsb-suite/server/requirements.txt
