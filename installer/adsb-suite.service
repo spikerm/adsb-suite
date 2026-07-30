@@ -1,0 +1,22 @@
+[Unit]
+Description=ADS-B Suite Server
+After=network-online.target readsb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=adsbsuite
+Group=adsbsuite
+SupplementaryGroups=readsb
+Environment=ADSB_SUITE_CONFIG=/etc/adsb-suite/config.json
+WorkingDirectory=/opt/adsb-suite/server
+ExecStart=/opt/adsb-suite/venv/bin/python /opt/adsb-suite/server/adsb_suite.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/adsb-suite
+
+[Install]
+WantedBy=multi-user.target
