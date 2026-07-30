@@ -2,11 +2,14 @@
   "listen_host": "0.0.0.0",
   "listen_port": 8090,
   "source_file": "/run/readsb/aircraft.json",
+  "receiver_name": "Papendrecht ADS-B",
   "receiver_lat": 51.843,
   "receiver_lon": 4.690,
   "poll_interval_seconds": 2,
   "history_interval_seconds": 10,
   "retention_days": 90,
+  "track_default_minutes": 30,
+  "track_max_hours": 24,
   "database_path": "/var/lib/adsb-suite/adsb-suite.db",
   "aircraft_database_path": "/var/lib/adsb-suite/aircraft.csv"
 }
