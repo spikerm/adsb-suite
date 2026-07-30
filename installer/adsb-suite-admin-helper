@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ACTION="${1:-}"; ARG="${2:-}"
+case "$ACTION" in
+  service-status)
+    case "$ARG" in adsb-suite|readsb|tar1090) systemctl is-active "$ARG" 2>/dev/null || true;; *) exit 2;; esac
+    ;;
+  restart-suite) systemctl restart adsb-suite.service; echo "ADS-B Suite is herstart.";;
+  restart-readsb) systemctl restart readsb.service 2>/dev/null || systemctl restart readsb; echo "readsb is herstart.";;
+  update-database)
+    tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
+    curl -fL --retry 3 --connect-timeout 20 -o "$tmp" https://github.com/wiedehopf/tar1090-db/raw/csv/aircraft.csv.gz
+    gzip -t "$tmp"; install -m 644 "$tmp" /usr/local/share/tar1090/aircraft.csv.gz
+    systemctl restart readsb.service 2>/dev/null || systemctl restart readsb 2>/dev/null || true
+    echo "Vliegtuigdatabase bijgewerkt."
+    ;;
+  update-suite)
+    ADSB_SUITE_REF="${ADSB_SUITE_REF:-feature/v0.8-webadmin}" /usr/local/bin/adsb-suite-update
+    ;;
+  logs)
+    case "$ARG" in adsb-suite|readsb|tar1090) journalctl -u "$ARG" -n 250 --no-pager;; *) exit 2;; esac
+    ;;
+  backup)
+    mkdir -p /var/lib/adsb-suite/backups
+    file="/var/lib/adsb-suite/backups/adsb-suite-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+    tar -czf "$file" /etc/adsb-suite/config.json /var/lib/adsb-suite/adsb-suite.db /var/lib/adsb-suite/aircraft.csv 2>/dev/null || true
+    chown adsbsuite:adsbsuite "$file"; chmod 640 "$file"; echo "$file"
+    ;;
+  reboot) nohup sh -c 'sleep 2; systemctl reboot' >/dev/null 2>&1 & echo "Herstart ingepland.";;
+  *) echo "Onbekende actie" >&2; exit 2;;
+esac
