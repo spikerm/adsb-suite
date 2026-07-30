@@ -21,7 +21,6 @@ fi
 rm -rf /opt/adsb-suite/server
 cp -a "$SRC/server" /opt/adsb-suite/
 # readsb gebruikt `type` voor de bron van het bericht (bijv. adsb_icao), niet voor het vliegtuigtype.
-# Verwijder daarom deze onjuiste fallback; ICAO-type komt uit `t` of de aircraft-database.
 python3 - /opt/adsb-suite/server/adsb_suite.py <<'PY'
 from pathlib import Path
 p = Path(__import__('sys').argv[1])
@@ -42,6 +41,9 @@ with open(p,encoding='utf-8') as f: c=json.load(f)
 c.pop('source_url',None)
 c.setdefault('source_file','/run/readsb/aircraft.json')
 c.setdefault('receiver_name','Papendrecht ADS-B')
+# Exacte locatie van de ADS-B-antenne.
+c['receiver_lat']=51.842837320295985
+c['receiver_lon']=4.69044839675828
 c.setdefault('aircraft_database_path','/var/lib/adsb-suite/aircraft.csv')
 c.setdefault('track_default_minutes',30)
 c.setdefault('track_max_hours',24)
