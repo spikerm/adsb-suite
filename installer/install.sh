@@ -2,7 +2,7 @@
 set -euo pipefail
 [ "$EUID" -eq 0 ] || { echo "Gebruik: sudo ./installer/install.sh"; exit 1; }
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
-echo "ADS-B Suite v0.5.0 installeren/upgraden…"
+echo "ADS-B Suite v0.6.0 installeren/upgraden…"
 apt-get update
 apt-get install -y python3 python3-venv curl gzip
 
@@ -74,7 +74,8 @@ from pathlib import Path
 import sys
 p = Path(sys.argv[1])
 s = p.read_text(encoding='utf-8')
-s = s.replace('"0.3.0-beta2"', '"0.5.0"').replace('"0.4.0"', '"0.5.0"')
+for old in ('"0.3.0-beta2"', '"0.4.0"', '"0.5.0"'):
+    s = s.replace(old, '"0.6.0"')
 s = s.replace(', metadata.get("icao_type"), item.get("type"))', ', metadata.get("icao_type"))')
 s = s.replace('"description": first_text(metadata.get("description"), model),', '"description": first_text(item.get("desc"), metadata.get("description"), model),')
 s = s.replace('"operator": first_text(metadata.get("operator"), metadata.get("owner"), metadata.get("airline")),', '"operator": first_text(item.get("ownOp"), metadata.get("operator"), metadata.get("owner"), metadata.get("airline")),')
