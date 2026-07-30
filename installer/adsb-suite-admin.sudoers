@@ -1,0 +1,2 @@
+Defaults:adsbsuite !requiretty
+adsbsuite ALL=(root) NOPASSWD: /usr/local/sbin/adsb-suite-admin-helper *

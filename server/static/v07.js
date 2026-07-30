@@ -1,4 +1,4 @@
-/* ADS-B Suite v0.7: monitoring, filters, alerts and reception analysis. */
+/* ADS-B Suite v0.8: monitoring, filters, alerts and reception analysis. */
 (() => {
   const state={filter:'all',radius:250,minAlt:0,maxAlt:60000,alerts:new Set(),history:[]};
   const emergencySquawks={7500:'Kaping',7600:'Radiostoring',7700:'Noodsituatie'};
@@ -17,17 +17,62 @@
     if(state.filter==='emergency'&&!isEmergency(a))return false;
     return true;
   };
+
   const alertBox=document.createElement('div');alertBox.className='v07-alerts';document.body.appendChild(alertBox);
-  function notify(a,title){const key=`${a.hex}:${title}`;if(state.alerts.has(key))return;state.alerts.add(key);const node=document.createElement('div');node.className='v07-alert';node.innerHTML=`<strong>${esc(title)}</strong><span>${esc(a.flight||a.registration||a.hex)} · ${fmt(a.distance_km)} km · ${fmt(first(a.altitude_ft,a.alt_baro),0)} ft</span>`;alertBox.prepend(node);setTimeout(()=>node.remove(),12000);if('Notification'in window&&Notification.permission==='granted')new Notification(title,{body:`${a.flight||a.registration||a.hex} op ${fmt(a.distance_km)} km`});}
+  function toast(title,text=''){
+    const node=document.createElement('div');node.className='v07-alert';node.innerHTML=`<strong>${esc(title)}</strong>${text?`<span>${esc(text)}</span>`:''}`;alertBox.prepend(node);setTimeout(()=>node.remove(),9000);
+  }
+  function notify(a,title){
+    const key=`${a.hex}:${title}`;if(state.alerts.has(key))return;state.alerts.add(key);
+    toast(title,`${a.flight||a.registration||a.hex} · ${fmt(a.distance_km)} km · ${fmt(first(a.altitude_ft,a.alt_baro),0)} ft`);
+    if('Notification'in window&&window.isSecureContext&&Notification.permission==='granted'){
+      try{new Notification(title,{body:`${a.flight||a.registration||a.hex} op ${fmt(a.distance_km)} km`})}catch(e){console.warn(e)}
+    }
+  }
   function monitor(items){items.forEach(a=>{if(isEmergency(a))notify(a,`${emergencySquawks[String(a.squawk)]} – squawk ${a.squawk}`);else if(specialType.test(String(first(a.aircraft_type,a.t,a.model)||'')))notify(a,'Bijzonder vliegtuigtype');else if(isMilitary(a)&&Number(a.distance_km)<80)notify(a,'Militair toestel binnen 80 km')});}
+
   const originalUpdateMap=updateMap,originalUpdateTable=updateTable,originalApply=apply;
   updateMap=function(items){originalUpdateMap(items.filter(match));items.forEach(a=>{const m=markers.get(a.hex);if(m&&m._icon){m._icon.classList.toggle('v07-emergency',isEmergency(a));m._icon.classList.toggle('v07-special',isMilitary(a)||specialType.test(String(first(a.aircraft_type,a.t,a.model)||'')))}})};
   updateTable=function(){const q=el('filter').value.trim().toLowerCase();const source=aircraft.filter(match);const rows=source.filter(a=>!q||[a.flight,a.registration,a.r,a.hex,a.aircraft_type,a.t,a.operator,a.ownOp,a.manufacturer,a.model,a.description,a.desc,a.country].some(v=>String(v||'').toLowerCase().includes(q))).map(a=>`<tr data-hex="${esc(a.hex)}"><td>${esc(a.flight||a.hex)}</td><td>${esc(first(a.registration,a.r)||'–')}</td><td>${esc(first(a.model,a.description,a.desc,a.aircraft_type,a.t)||'–')}</td><td>${esc(first(a.operator,a.ownOp)||'–')}</td><td>${fmt(a.altitude_ft,0)} ft</td><td>${fmt(a.speed_kt)} kt</td><td>${fmt(a.distance_km)} km</td></tr>`).join('');el('aircraftRows').innerHTML=rows;el('aircraftRows').querySelectorAll('tr').forEach(r=>r.onclick=()=>{const a=aircraft.find(x=>x.hex===r.dataset.hex);if(a){showDetail(a);document.querySelector('[data-view="radar"]').click();map.setView([a.lat,a.lon],11)}})};
   apply=function(data){originalApply(data);state.history.push({ts:Date.now(),mps:Number(data.messages_per_second)||0,count:(data.aircraft||[]).length});if(state.history.length>360)state.history.shift();monitor(data.aircraft||[]);renderAnalysis()};
+
   const nav=document.querySelector('nav');const analysisButton=document.createElement('button');analysisButton.dataset.view='analysis';analysisButton.textContent='Analyse';nav.insertBefore(analysisButton,document.getElementById('toggleLabels'));
   const radar=document.getElementById('radar');radar.insertAdjacentHTML('beforebegin',`<section class="v07-toolbar"><label>Filter <select id="v07Filter"><option value="all">Alle vliegtuigen</option><option value="heavy">Alleen heavies</option><option value="helicopter">Alleen helikopters</option><option value="military">Alleen militair</option><option value="emergency">Alleen noodsituaties</option></select></label><label>Straal <input id="v07Radius" type="number" min="5" max="500" value="250" step="5"> km</label><label>Min. hoogte <input id="v07MinAlt" type="number" min="0" max="60000" value="0" step="1000"> ft</label><button id="v07Notify">Browsermeldingen</button></section><section id="analysis" class="view"><div class="v07-analysis"><article class="wide"><h2>Live monitoring</h2><div id="v07Kpis" class="v07-kpis"></div></article><article><h2>Ontvangst-polarplot</h2><div id="v07Polar"></div></article><article><h2>Top operators live</h2><div id="v07Operators"></div></article><article><h2>Top typen live</h2><div id="v07Types"></div></article><article class="wide"><h2>Automatische analyse</h2><div id="v07Summary"></div></article></div></section>`);
+
+  analysisButton.onclick=()=>{
+    document.querySelectorAll('[data-view]').forEach(x=>x.classList.remove('active'));
+    document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
+    analysisButton.classList.add('active');
+    document.getElementById('analysis').classList.add('active');
+    renderAnalysis();
+  };
+
   function bars(target,groups){const max=Math.max(...groups.map(x=>x[1]),1);document.getElementById(target).innerHTML=groups.slice(0,8).map(([name,count])=>`<div class="v07-bar"><span>${esc(name)}</span><i style="width:${count/max*100}%"></i><b>${count}</b></div>`).join('')||'<p class="muted">Geen gegevens</p>'}
   function polar(items){const bins=Array(36).fill(0);items.forEach(a=>{const b=Number(a.bearing_deg),d=Number(a.distance_km);if(Number.isFinite(b)&&Number.isFinite(d))bins[Math.floor(((b%360)+360)%360/10)]=Math.max(bins[Math.floor(((b%360)+360)%360/10)],d)});const max=Math.max(...bins,1),cx=180,cy=180,r=150;const pts=bins.map((d,i)=>{const ang=(i*10-90)*Math.PI/180,rr=r*d/max;return`${cx+Math.cos(ang)*rr},${cy+Math.sin(ang)*rr}`}).join(' ');let grid='';[.25,.5,.75,1].forEach(f=>grid+=`<circle cx="${cx}" cy="${cy}" r="${r*f}"/>`);[0,90,180,270].forEach(deg=>{const a=(deg-90)*Math.PI/180;grid+=`<line x1="${cx}" y1="${cy}" x2="${cx+Math.cos(a)*r}" y2="${cy+Math.sin(a)*r}"/><text x="${cx+Math.cos(a)*(r+14)-7}" y="${cy+Math.sin(a)*(r+14)+4}">${deg}°</text>`});document.getElementById('v07Polar').innerHTML=`<svg class="v07-polar" viewBox="0 0 360 360">${grid}<polygon points="${pts}"/></svg><p class="muted">Maximaal live bereik ${fmt(max)} km</p>`}
   function renderAnalysis(){const items=aircraft||[],filtered=items.filter(match),em=items.filter(isEmergency),mil=items.filter(isMilitary),heavy=items.filter(isHeavy);document.getElementById('v07Kpis').innerHTML=`<div><small>Gefilterd zichtbaar</small><strong>${filtered.length}</strong></div><div><small>Heavies</small><strong>${heavy.length}</strong></div><div><small>Militair</small><strong>${mil.length}</strong></div><div><small>Noodsquawks</small><strong>${em.length}</strong></div>`;const group=fn=>Object.entries(items.reduce((o,a)=>{const k=fn(a)||'Onbekend';o[k]=(o[k]||0)+1;return o},{})).sort((a,b)=>b[1]-a[1]);bars('v07Operators',group(a=>first(a.operator,a.ownOp)));bars('v07Types',group(a=>first(a.aircraft_type,a.t,a.model)));polar(items);const nearest=[...items].sort((a,b)=>(a.distance_km||9999)-(b.distance_km||9999))[0];const highest=[...items].sort((a,b)=>(b.altitude_ft||0)-(a.altitude_ft||0))[0];const fastest=[...items].sort((a,b)=>(b.speed_kt||0)-(a.speed_kt||0))[0];document.getElementById('v07Summary').innerHTML=`<p><strong>Samenvatting:</strong> ${items.length} live toestellen. ${heavy.length} heavy, ${mil.length} vermoedelijk militair en ${em.length} met noodsquawk.</p><dl><dt>Dichtstbij</dt><dd>${nearest?esc(label(nearest))+' · '+fmt(nearest.distance_km)+' km':'–'}</dd><dt>Hoogste</dt><dd>${highest?esc(label(highest))+' · '+fmt(highest.altitude_ft,0)+' ft':'–'}</dd><dt>Snelste</dt><dd>${fastest?esc(label(fastest))+' · '+fmt(fastest.speed_kt,0)+' kt':'–'}</dd></dl>`}
-  document.getElementById('v07Filter').onchange=e=>{state.filter=e.target.value;updateMap(aircraft);updateTable();renderAnalysis()};document.getElementById('v07Radius').onchange=e=>{state.radius=Number(e.target.value)||250;updateMap(aircraft);updateTable();renderAnalysis()};document.getElementById('v07MinAlt').onchange=e=>{state.minAlt=Number(e.target.value)||0;updateMap(aircraft);updateTable();renderAnalysis()};document.getElementById('v07Notify').onclick=()=>{'Notification'in window&&Notification.requestPermission()};
+
+  document.getElementById('v07Filter').onchange=e=>{state.filter=e.target.value;updateMap(aircraft);updateTable();renderAnalysis()};
+  document.getElementById('v07Radius').onchange=e=>{state.radius=Number(e.target.value)||250;updateMap(aircraft);updateTable();renderAnalysis()};
+  document.getElementById('v07MinAlt').onchange=e=>{state.minAlt=Number(e.target.value)||0;updateMap(aircraft);updateTable();renderAnalysis()};
+
+  const notifyButton=document.getElementById('v07Notify');
+  function updateNotifyButton(){
+    if(!('Notification'in window)){notifyButton.textContent='Browsermeldingen niet ondersteund';notifyButton.disabled=true;return}
+    if(!window.isSecureContext){notifyButton.textContent='Meldingen vereisen HTTPS';notifyButton.title='Op een HTTP-adres met lokaal IP blokkeert de browser systeemmeldingen. Waarschuwingen in het dashboard blijven wel werken.';return}
+    if(Notification.permission==='granted')notifyButton.textContent='Browsermeldingen aan';
+    else if(Notification.permission==='denied')notifyButton.textContent='Browsermeldingen geblokkeerd';
+    else notifyButton.textContent='Browsermeldingen inschakelen';
+  }
+  notifyButton.onclick=async()=>{
+    if(!('Notification'in window)){toast('Browsermeldingen niet ondersteund');return}
+    if(!window.isSecureContext){toast('HTTPS vereist','Chrome staat systeemmeldingen niet toe op een onbeveiligd lokaal HTTP-adres. Dashboardwaarschuwingen blijven actief.');updateNotifyButton();return}
+    try{
+      const permission=await Notification.requestPermission();
+      updateNotifyButton();
+      if(permission==='granted'){toast('Browsermeldingen ingeschakeld');new Notification('ADS-B Suite',{body:'Browsermeldingen zijn actief.'})}
+      else toast('Browsermeldingen niet toegestaan','Sta meldingen toe via het slotje of de site-instellingen van de browser.');
+    }catch(e){toast('Browsermeldingen mislukt',e.message||String(e))}
+  };
+  updateNotifyButton();
+  renderAnalysis();
 })();
