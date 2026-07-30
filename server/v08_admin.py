@@ -42,9 +42,7 @@ def _run_helper(action, *args, timeout=45):
     return {'ok': p.returncode == 0, 'code': p.returncode, 'output': (p.stdout + p.stderr)[-30000:]}
 
 def _write_config(config_path, current):
-    tmp = config_path.with_suffix('.json.tmp')
-    tmp.write_text(json.dumps(current, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
-    os.replace(tmp, config_path)
+    config_path.write_text(json.dumps(current, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 
 def _service_exists(name):
     p = subprocess.run(['systemctl', 'list-unit-files', f'{name}.service', '--no-legend'], text=True, capture_output=True)
