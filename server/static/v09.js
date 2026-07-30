@@ -1,0 +1,13 @@
+/* ADS-B Suite v0.9 Smart Dashboard */
+(()=>{
+  const prefs=JSON.parse(localStorage.getItem('adsb-v09-prefs')||'{}');
+  const save=()=>localStorage.setItem('adsb-v09-prefs',JSON.stringify(prefs));
+  const applyTheme=()=>{document.documentElement.dataset.theme=prefs.theme||'dark';const b=document.getElementById('v09Theme');if(b)b.textContent=(prefs.theme||'dark')==='dark'?'☀ Lichte modus':'☾ Donkere modus'};
+  const toast=(title,text,type='')=>{document.querySelector('.v09-toast')?.remove();const n=document.createElement('div');n.className=`v09-toast ${type}`;n.innerHTML=`<strong>${esc(title)}</strong><span>${esc(text)}</span>`;document.body.appendChild(n);setTimeout(()=>n.remove(),6500)};
+  const controls=document.createElement('div');controls.className='v09-controls';controls.innerHTML='<span class="v09-health"><i id="v09HealthDot" class="v09-dot"></i><span id="v09HealthText">Diagnose…</span></span><button id="v09Theme" type="button"></button><button id="v09TestNotification" type="button">Test melding</button><a href="/setup">Setup</a><a href="/admin">Beheer</a>';
+  document.querySelector('nav')?.appendChild(controls);applyTheme();
+  document.getElementById('v09Theme').onclick=()=>{prefs.theme=(prefs.theme||'dark')==='dark'?'light':'dark';save();applyTheme()};
+  async function diagnostics(){try{const r=await fetch('/api/diagnostics');if(!r.ok)throw new Error(`HTTP ${r.status}`);const d=await r.json();const ok=d.overall==='ok',warn=d.overall==='warning';const dot=document.getElementById('v09HealthDot'),txt=document.getElementById('v09HealthText');dot.className=`v09-dot ${ok?'ok':warn?'':'bad'}`;txt.textContent=ok?'Systeem OK':warn?'Aandacht nodig':'Storing';txt.title=(d.checks||[]).map(x=>`${x.ok?'✓':'✕'} ${x.name}: ${x.detail||''}`).join('\n')}catch(e){document.getElementById('v09HealthDot').className='v09-dot bad';document.getElementById('v09HealthText').textContent='Diagnose fout'}}
+  document.getElementById('v09TestNotification').onclick=async()=>{if(!window.isSecureContext){toast('HTTPS vereist','Open ADS-B Suite via de HTTPS-URL op poort 8443.','bad');return}if(!('Notification'in window)){toast('Niet ondersteund','Deze browser ondersteunt geen systeemmeldingen.','bad');return}let p=Notification.permission;if(p==='default')p=await Notification.requestPermission();if(p==='granted'){new Notification('ADS-B Suite testmelding',{body:'Browsermeldingen werken correct.'});toast('Melding verzonden','De testmelding is aangeboden aan Windows.','ok')}else toast('Melding geblokkeerd','Sta meldingen toe in de browserinstellingen.','bad')};
+  diagnostics();setInterval(diagnostics,30000);
+})();
