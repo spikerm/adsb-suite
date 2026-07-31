@@ -7,6 +7,7 @@ import time
 import urllib.request
 from pathlib import Path
 from aiohttp import web
+from v30_plugins import register_plugin_manager
 
 DEFAULTS = {
     "enabled": True,
@@ -133,3 +134,4 @@ def register_spotter(app, db_path, cfg):
     app.router.add_put("/api/spotter/settings", put_settings)
     app.router.add_post("/api/spotter/event", event)
     app.router.add_get("/api/spotter/stats", stats)
+    register_plugin_manager(app)
