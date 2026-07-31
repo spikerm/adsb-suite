@@ -2,7 +2,7 @@
 set -euo pipefail
 [ "$EUID" -eq 0 ] || { echo "Gebruik: sudo ./installer/install.sh"; exit 1; }
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
-echo "ADS-B Suite v2.0.0 installeren/upgraden…"
+echo "ADS-B Suite v3.0.0 installeren/upgraden…"
 apt-get update
 apt-get install -y python3 python3-venv curl gzip sudo nginx openssl
 
@@ -46,7 +46,7 @@ python3 - /opt/adsb-suite/server/adsb_suite.py <<'PY'
 from pathlib import Path
 import sys
 p=Path(sys.argv[1]); s=p.read_text(encoding='utf-8')
-for old in ('"0.3.0-beta2"','"0.4.0"','"0.5.0"','"0.6.0"','"0.7.0"','"0.8.0"','"0.8.1"','"0.9.0"','"0.9.1"','"1.0.0"','"1.1.0"','"1.2.0"'): s=s.replace(old,'"2.0.0"')
+for old in ('"0.3.0-beta2"','"0.4.0"','"0.5.0"','"0.6.0"','"0.7.0"','"0.8.0"','"0.8.1"','"0.9.0"','"0.9.1"','"1.0.0"','"1.1.0"','"1.2.0"','"2.0.0"'): s=s.replace(old,'"3.0.0"')
 s=s.replace(', metadata.get("icao_type"), item.get("type"))', ', metadata.get("icao_type"))')
 s=s.replace('"description": first_text(metadata.get("description"), model),','"description": first_text(item.get("desc"), metadata.get("description"), model),')
 s=s.replace('"operator": first_text(metadata.get("operator"), metadata.get("owner"), metadata.get("airline")),','"operator": first_text(item.get("ownOp"), metadata.get("operator"), metadata.get("owner"), metadata.get("airline")),')
@@ -87,7 +87,7 @@ with open(p,encoding='utf-8') as f:c=json.load(f)
 c.pop('source_url',None); c.setdefault('source_file','/run/readsb/aircraft.json'); c.setdefault('receiver_name','Papendrecht ADS-B')
 c.setdefault('receiver_lat',51.842837320295985); c.setdefault('receiver_lon',4.69044839675828); c.setdefault('antenna_height_m',10.0)
 c.setdefault('aircraft_database_path','/var/lib/adsb-suite/aircraft.csv'); c.setdefault('track_default_minutes',30); c.setdefault('track_max_hours',24)
-c.setdefault('update_channel','feature/v0.9-smart-dashboard'); c.setdefault('aviation_data_dir','/var/lib/adsb-suite/aviation'); c.setdefault('spotter_settings_path','/var/lib/adsb-suite/spotter.json')
+c.setdefault('update_channel','feature/v0.9-smart-dashboard'); c.setdefault('aviation_data_dir','/var/lib/adsb-suite/aviation'); c.setdefault('spotter_settings_path','/var/lib/adsb-suite/spotter.json'); c.setdefault('plugin_state_path','/var/lib/adsb-suite/plugins.json')
 if not c.get('admin_password_hash'):
     password=secrets.token_urlsafe(12); salt=secrets.token_hex(16); digest=hashlib.pbkdf2_hmac('sha256',password.encode(),salt.encode(),240000).hex()
     c['admin_password_hash']=f'pbkdf2_sha256${salt}${digest}'; open('/run/adsb-suite-admin-password','w').write(password)
@@ -108,5 +108,5 @@ systemctl daemon-reload; systemctl reset-failed adsb-suite.service 2>/dev/null |
 chmod +x "$SRC/installer/setup-https.sh"; "$SRC/installer/setup-https.sh"
 sleep 3
 IP=$(hostname -I | awk '{print $1}')
-echo; echo "ADS-B Suite v2.0.0 geïnstalleerd"; echo "Dashboard HTTPS: https://${IP}:8443/"; echo "Setup wizard:    https://${IP}:8443/setup"; echo "Webbeheer:       https://${IP}:8443/admin"
+echo; echo "ADS-B Suite v3.0.0 geïnstalleerd"; echo "Dashboard HTTPS: https://${IP}:8443/"; echo "Setup wizard:    https://${IP}:8443/setup"; echo "Webbeheer:       https://${IP}:8443/admin"; echo "Plugin Manager:  https://${IP}:8443/ (tab Plugins)"
 if [ -s /run/adsb-suite-admin-password ]; then echo "Beheerwachtwoord: $(cat /run/adsb-suite-admin-password)"; rm -f /run/adsb-suite-admin-password; fi
