@@ -8,6 +8,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
 #include "mqtt_client.h"
@@ -223,7 +224,6 @@ static void wifi_event(void *, esp_event_base_t base, int32_t id, void *)
         g_wifi_connected = false;
         g_mqtt_connected = false;
         g_ui_dirty = true;
-        vTaskDelay(pdMS_TO_TICKS(500));
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         g_wifi_connected = true;
@@ -346,7 +346,7 @@ static void draw_radar(lv_obj_t *screen, const AircraftDot *planes, size_t count
     const float radius = 74.0f;
     for (size_t i = 0; i < count; ++i) {
         if (planes[i].distance_km <= 0 || planes[i].distance_km > range) continue;
-        float angle = (planes[i].bearing - 90.0f) * (float)M_PI / 180.0f;
+        float angle = (planes[i].bearing - 90.0f) * 3.14159265f / 180.0f;
         float rr = (planes[i].distance_km / range) * radius;
         int x = (int)(cosf(angle) * rr);
         int y = (int)(sinf(angle) * rr);
