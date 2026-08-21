@@ -9,3 +9,7 @@ CONFIG_ESP_WIFI_MGMT_SBUF_NUM=16
 
 # This display is a station-only MQTT client.
 CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=n
+
+# The ESP32-C3-LCDkit board used here has 4 MB flash. Keep ESP-IDF's generated
+# sdkconfig aligned with the actual chip and the 3 MB factory partition table.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
