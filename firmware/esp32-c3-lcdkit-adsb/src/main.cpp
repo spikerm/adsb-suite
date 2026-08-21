@@ -84,6 +84,8 @@ static const int g_radar_ranges[] = {25, 50, 100, 200, 400};
 static int g_radar_range_idx = 1; // default 50 km
 static int g_sweep_deg = 0;
 static int64_t g_last_sweep_ms = 0;
+static int g_selected_plane = 0;
+static bool g_long_press_handled = false;
 static char g_alert[40]{};
 static int64_t g_alert_until_ms = 0;
 
@@ -98,12 +100,16 @@ static lv_obj_t *g_status_info = nullptr;
 static lv_obj_t *g_alert_label = nullptr;
 static lv_obj_t *g_radar_title = nullptr;
 static lv_obj_t *g_radar_count = nullptr;
+static lv_obj_t *g_radar_selected = nullptr;
+static lv_obj_t *g_radar_ring_labels[3]{};
 static lv_obj_t *g_radar_targets[MAX_PLANES]{};
 static bool g_target_active[MAX_PLANES]{};
 static float g_target_bearing[MAX_PLANES]{};
 static bool g_target_emergency[MAX_PLANES]{};
 static lv_obj_t *g_sweep_lines[12]{};
 static lv_point_precise_t g_sweep_points[12][2]{};
+static lv_obj_t *g_selected_vector = nullptr;
+static lv_point_precise_t g_selected_vector_points[2]{};
 
 static int64_t now_ms() { return esp_timer_get_time() / 1000; }
 
@@ -264,7 +270,6 @@ static void parser_task(void *)
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         if (!g_mqtt_payload_ready) continue;
 
-        // MQTT task will not touch the assembly buffer while payload_ready is set.
         int len = g_mqtt_expected_len;
         if (len > 0 && len < (int)MQTT_RX_MAX && g_mqtt_topic[0]) {
             dispatch_mqtt_payload(g_mqtt_topic, g_mqtt_rx, len);
@@ -312,9 +317,6 @@ static void mqtt_event(void *, esp_event_base_t, int32_t event_id, void *event_d
         case MQTT_EVENT_DATA: {
             if (!e || !e->data || e->data_len < 0 || e->total_data_len <= 0) break;
 
-            // Parser has ownership of the shared RX buffer. This should only last a
-            // few milliseconds; if a complete second MQTT message arrives meanwhile,
-            // drop it rather than ever racing/corrupting the parser buffer.
             if (g_mqtt_payload_ready) {
                 if (e->current_data_offset == 0) {
                     ++g_mqtt_dropped_messages;
@@ -383,7 +385,7 @@ static bool prepare_mqtt()
     }
     cfg.buffer.size = 4096;
     cfg.buffer.out_size = 1024;
-    cfg.task.stack_size = 3072; // network/event work only; JSON parsing moved out
+    cfg.task.stack_size = 3072;
     cfg.task.priority = 5;
     cfg.session.keepalive = 30;
     cfg.network.reconnect_timeout_ms = 3000;
@@ -407,8 +409,6 @@ static void start_mqtt()
     g_mqtt_started = true;
     ESP_LOGI(TAG, "MQTT client started");
 
-    // Create parser after MQTT itself has successfully claimed its stack/heap.
-    // Priority 6 lets it drain a completed payload before the next MQTT message.
     if (!g_parser_task) {
         BaseType_t ok = xTaskCreate(parser_task, "adsb-parser", 4096, nullptr, 6, &g_parser_task);
         if (ok != pdPASS) {
@@ -511,6 +511,10 @@ static void page_focus_cb(lv_event_t *e)
 static void page_click_cb(lv_event_t *e)
 {
     int page = (int)(intptr_t)lv_event_get_user_data(e);
+    if (g_long_press_handled) {
+        g_long_press_handled = false;
+        return;
+    }
     if (page == 1) {
         g_radar_range_idx = (g_radar_range_idx + 1) % 5;
         ESP_LOGI(TAG, "radar range -> %d km", g_radar_ranges[g_radar_range_idx]);
@@ -518,6 +522,16 @@ static void page_click_cb(lv_event_t *e)
     } else if (g_nav_group) {
         lv_group_focus_next(g_nav_group);
     }
+}
+
+static void page_long_press_cb(lv_event_t *e)
+{
+    int page = (int)(intptr_t)lv_event_get_user_data(e);
+    if (page != 1) return;
+    g_long_press_handled = true;
+    g_selected_plane = (g_selected_plane + 1) % (int)MAX_PLANES;
+    g_data_dirty = true;
+    ESP_LOGI(TAG, "radar target select request -> %d", g_selected_plane);
 }
 
 static void build_ui()
@@ -569,8 +583,23 @@ static void build_ui()
         g_radar_targets[i] = d;
     }
 
+    g_selected_vector = make_line(g_pages[1], 0xb0ffbd, 1);
+    lv_line_set_points(g_selected_vector, g_selected_vector_points, 2);
+    lv_obj_add_flag(g_selected_vector, LV_OBJ_FLAG_HIDDEN);
+
     g_radar_title = label(g_pages[1], "PPI 50 km", 8, RADAR_GREEN);
     g_radar_count = label(g_pages[1], "0 targets", 216, RADAR_GREEN_MED);
+    g_radar_selected = label(g_pages[1], "", 178, 0xb0ffbd);
+    lv_obj_set_style_text_align(g_radar_selected, LV_TEXT_ALIGN_CENTER, 0);
+
+    for (int i = 0; i < 3; ++i) {
+        g_radar_ring_labels[i] = lv_label_create(g_pages[1]);
+        lv_label_set_text(g_radar_ring_labels[i], "");
+        lv_obj_set_style_text_color(g_radar_ring_labels[i], lv_color_hex(RADAR_GREEN_DIM), 0);
+    }
+    lv_obj_set_pos(g_radar_ring_labels[0], 143, 123);
+    lv_obj_set_pos(g_radar_ring_labels[1], 170, 123);
+    lv_obj_set_pos(g_radar_ring_labels[2], 198, 123);
 
     lv_obj_t *north = lv_label_create(g_pages[1]);
     lv_label_set_text(north, "N");
@@ -608,6 +637,7 @@ static void build_ui()
             lv_obj_set_style_outline_width(btn, 0, 0);
             lv_obj_add_event_cb(btn, page_focus_cb, LV_EVENT_FOCUSED, (void *)(intptr_t)i);
             lv_obj_add_event_cb(btn, page_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+            lv_obj_add_event_cb(btn, page_long_press_cb, LV_EVENT_LONG_PRESSED, (void *)(intptr_t)i);
             lv_group_add_obj(g_nav_group, btn);
             g_nav_buttons[i] = btn;
         }
@@ -656,6 +686,23 @@ static void update_sweep()
     }
 }
 
+static bool plane_visible(const AircraftDot &p, float range)
+{
+    return p.distance_km > 0 && p.distance_km <= range;
+}
+
+static int find_selected_visible(const AircraftDot *planes, size_t count, float range)
+{
+    if (!count) return -1;
+    if (g_selected_plane < 0) g_selected_plane = 0;
+    int start = g_selected_plane % (int)count;
+    for (size_t step = 0; step < count; ++step) {
+        int idx = (start + (int)step) % (int)count;
+        if (plane_visible(planes[idx], range)) return idx;
+    }
+    return -1;
+}
+
 static void update_ui_data(const Summary &s, const AircraftDot *planes, size_t count)
 {
     char buf[192];
@@ -692,12 +739,24 @@ static void update_ui_data(const Summary &s, const AircraftDot *planes, size_t c
     snprintf(buf, sizeof(buf), "PPI %d km", (int)range);
     lv_label_set_text(g_radar_title, buf);
 
-    size_t shown = 0;
+    const float ring_values[3] = {range * 0.30f, range * 0.55f, range * 0.80f};
+    for (int i = 0; i < 3; ++i) {
+        if (ring_values[i] < 10.0f) snprintf(buf, sizeof(buf), "%.1f", (double)ring_values[i]);
+        else snprintf(buf, sizeof(buf), "%.0f", (double)ring_values[i]);
+        lv_label_set_text(g_radar_ring_labels[i], buf);
+    }
+
     if (count > MAX_PLANES) count = MAX_PLANES;
+    int selected = find_selected_visible(planes, count, range);
+    if (selected >= 0) g_selected_plane = selected;
+
+    size_t shown = 0;
+    int selected_x = RADAR_CX;
+    int selected_y = RADAR_CY;
     for (size_t i = 0; i < MAX_PLANES; ++i) {
         g_target_active[i] = false;
         g_target_emergency[i] = false;
-        if (i >= count || planes[i].distance_km <= 0 || planes[i].distance_km > range) {
+        if (i >= count || !plane_visible(planes[i], range)) {
             lv_obj_add_flag(g_radar_targets[i], LV_OBJ_FLAG_HIDDEN);
             continue;
         }
@@ -709,9 +768,12 @@ static void update_ui_data(const Summary &s, const AircraftDot *planes, size_t c
         bool emergency = !strcmp(planes[i].squawk, "7500") ||
                          !strcmp(planes[i].squawk, "7600") ||
                          !strcmp(planes[i].squawk, "7700");
-        int sz = emergency ? 10 : 8;
+        bool is_selected = ((int)i == selected);
+        int sz = emergency ? 10 : (is_selected ? 12 : 8);
         lv_obj_set_size(g_radar_targets[i], sz, sz);
         lv_obj_set_style_bg_color(g_radar_targets[i], emergency ? lv_color_hex(0xff3030) : lv_color_hex(RADAR_GREEN), 0);
+        lv_obj_set_style_border_width(g_radar_targets[i], is_selected ? 2 : 1, 0);
+        lv_obj_set_style_border_color(g_radar_targets[i], is_selected ? lv_color_white() : lv_color_hex(0xb0ffbd), 0);
         lv_obj_set_pos(g_radar_targets[i], x - sz / 2, y - sz / 2);
         lv_obj_set_style_opa(g_radar_targets[i], emergency ? LV_OPA_COVER : 180, 0);
         lv_obj_remove_flag(g_radar_targets[i], LV_OBJ_FLAG_HIDDEN);
@@ -719,16 +781,42 @@ static void update_ui_data(const Summary &s, const AircraftDot *planes, size_t c
         g_target_active[i] = true;
         g_target_bearing[i] = planes[i].bearing;
         g_target_emergency[i] = emergency;
+        if (is_selected) {
+            selected_x = x;
+            selected_y = y;
+        }
         ++shown;
+    }
+
+    if (selected >= 0) {
+        const AircraftDot &p = planes[selected];
+        const char *id = p.flight[0] ? p.flight : (p.hex[0] ? p.hex : "---");
+        snprintf(buf, sizeof(buf), "%s  %.1fkm  %dft\n%.0fkt  TRK %03d",
+                 id, (double)p.distance_km, p.altitude_ft, (double)p.speed_kt, p.track);
+        lv_label_set_text(g_radar_selected, buf);
+        lv_obj_remove_flag(g_radar_selected, LV_OBJ_FLAG_HIDDEN);
+
+        float ta = ((float)p.track - 90.0f) * PI_F / 180.0f;
+        g_selected_vector_points[0].x = selected_x;
+        g_selected_vector_points[0].y = selected_y;
+        g_selected_vector_points[1].x = selected_x + (int)lroundf(cosf(ta) * 16.0f);
+        g_selected_vector_points[1].y = selected_y + (int)lroundf(sinf(ta) * 16.0f);
+        lv_line_set_points(g_selected_vector, g_selected_vector_points, 2);
+        lv_obj_remove_flag(g_selected_vector, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(g_selected_vector);
+    } else {
+        lv_label_set_text(g_radar_selected, "");
+        lv_obj_add_flag(g_selected_vector, LV_OBJ_FLAG_HIDDEN);
     }
 
     snprintf(buf, sizeof(buf), "%u/%u targets", (unsigned)shown, (unsigned)count);
     lv_label_set_text(g_radar_count, buf);
     lv_obj_move_foreground(g_radar_title);
     lv_obj_move_foreground(g_radar_count);
+    lv_obj_move_foreground(g_radar_selected);
 
-    ESP_LOGI(TAG, "PPI plotted %u/%u targets at range %dkm",
-             (unsigned)shown, (unsigned)count, (int)range);
+    ESP_LOGI(TAG, "PPI plotted %u/%u targets at range %dkm selected=%d",
+             (unsigned)shown, (unsigned)count, (int)range, selected);
 
     if (g_alert[0] && now_ms() < g_alert_until_ms) {
         lv_label_set_text(g_alert_label, g_alert);
