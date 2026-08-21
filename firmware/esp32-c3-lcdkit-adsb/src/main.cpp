@@ -8,7 +8,7 @@
 #include "config.h"
 
 constexpr int PIN_LCD_BL=5, PIN_ENC_A=10, PIN_ENC_B=6, PIN_ENC_SW=9, PIN_RGB=8;
-constexpr uint16_t BG=TFT_BLACK, FG=TFT_WHITE, DIM=0x7BEF, ACCENT=TFT_CYAN, OK=TFT_GREEN, ALERT=TFT_RED;
+constexpr uint16_t BG=TFT_BLACK, FG=TFT_WHITE, DIM=0x7BEF, ACCENT=TFT_CYAN, COLOR_OK=TFT_GREEN, ALERT=TFT_RED;
 
 TFT_eSPI tft;
 WiFiClient wifiClient;
@@ -52,7 +52,7 @@ void footer(const char *s){ tft.setTextDatum(BC_DATUM); tft.setTextColor(DIM,BG)
 
 void drawOverview(){
   header("ADS-B");
-  tft.setTextDatum(MC_DATUM); tft.setTextColor(summary.sourceOnline?OK:ALERT,BG); tft.drawString(String(summary.aircraft),120,75,4);
+  tft.setTextDatum(MC_DATUM); tft.setTextColor(summary.sourceOnline?COLOR_OK:ALERT,BG); tft.drawString(String(summary.aircraft),120,75,4);
   tft.setTextColor(FG,BG); tft.drawString("AIRCRAFT",120,103,2);
   tft.setTextDatum(TL_DATUM); tft.setTextColor(DIM,BG);
   tft.drawString("POS",52,131,2); tft.drawString("MSG/S",52,153,2); tft.drawString("MAX",52,175,2);
@@ -88,7 +88,7 @@ void drawNearest(){
 }
 
 void drawStatus(){
-  header("RECEIVER"); tft.setTextDatum(MC_DATUM); tft.setTextColor(summary.sourceOnline?OK:ALERT,BG);
+  header("RECEIVER"); tft.setTextDatum(MC_DATUM); tft.setTextColor(summary.sourceOnline?COLOR_OK:ALERT,BG);
   tft.drawString(summary.sourceOnline?"ONLINE":"OFFLINE",120,72,4);
   tft.setTextDatum(TL_DATUM); tft.setTextColor(DIM,BG); tft.drawString("Wi-Fi",48,119,2); tft.drawString("MQTT",48,143,2); tft.drawString("Data age",48,167,2);
   tft.setTextDatum(TR_DATUM); tft.setTextColor(FG,BG); tft.drawString(WiFi.status()==WL_CONNECTED?"OK":"DOWN",192,119,2);
