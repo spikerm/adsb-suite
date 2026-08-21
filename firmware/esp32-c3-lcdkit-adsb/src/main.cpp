@@ -67,6 +67,10 @@ static lv_display_t *g_display = nullptr;
 static char g_mqtt_rx[MQTT_RX_MAX]{};
 static char g_mqtt_topic[96]{};
 static size_t g_mqtt_rx_total = 0;
+static int g_mqtt_expected_len = 0;
+static uint32_t g_mqtt_rx_messages = 0;
+static int64_t g_last_summary_ms = 0;
+static int64_t g_last_aircraft_ms = 0;
 
 static int g_page = 0;
 static const int g_radar_ranges[] = {25, 50, 100, 200, 400};
@@ -85,7 +89,6 @@ static lv_obj_t *g_overview_near = nullptr;
 static lv_obj_t *g_nearest_info = nullptr;
 static lv_obj_t *g_status_info = nullptr;
 static lv_obj_t *g_alert_label = nullptr;
-
 static lv_obj_t *g_radar_title = nullptr;
 static lv_obj_t *g_radar_count = nullptr;
 static lv_obj_t *g_radar_targets[MAX_PLANES]{};
@@ -144,20 +147,32 @@ static void parse_plane(const cJSON *o, AircraftDot &a)
 static void handle_summary(const char *data, int len)
 {
     cJSON *root = cJSON_ParseWithLength(data, len);
-    if (!root) return;
+    if (!cJSON_IsObject(root)) {
+        ESP_LOGW(TAG, "summary JSON parse failed len=%d", len);
+        cJSON_Delete(root);
+        return;
+    }
+
+    Summary incoming{};
+    incoming.aircraft = json_int(root, "aircraft");
+    incoming.with_position = json_int(root, "with_position");
+    incoming.msg_rate = json_float(root, "msg_rate");
+    incoming.max_range_km = json_float(root, "max_range_km");
+    incoming.age_seconds = json_int(root, "age_seconds");
+    incoming.source_online = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "source_online"));
+    const cJSON *nearest = cJSON_GetObjectItemCaseSensitive(root, "nearest");
+    if (cJSON_IsObject(nearest)) parse_plane(nearest, incoming.nearest);
+
     if (xSemaphoreTake(g_data_mutex, pdMS_TO_TICKS(100))) {
-        g_summary.aircraft = json_int(root, "aircraft");
-        g_summary.with_position = json_int(root, "with_position");
-        g_summary.msg_rate = json_float(root, "msg_rate");
-        g_summary.max_range_km = json_float(root, "max_range_km");
-        g_summary.age_seconds = json_int(root, "age_seconds");
-        g_summary.source_online = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "source_online"));
-        const cJSON *nearest = cJSON_GetObjectItemCaseSensitive(root, "nearest");
-        if (cJSON_IsObject(nearest)) parse_plane(nearest, g_summary.nearest);
-        else memset(&g_summary.nearest, 0, sizeof(g_summary.nearest));
+        g_summary = incoming;
         xSemaphoreGive(g_data_mutex);
         g_data_dirty = true;
     }
+    g_last_summary_ms = now_ms();
+    ESP_LOGI(TAG, "summary: aircraft=%d pos=%d msg=%.0f max=%.0fkm age=%ds online=%s",
+             incoming.aircraft, incoming.with_position, (double)incoming.msg_rate,
+             (double)incoming.max_range_km, incoming.age_seconds,
+             incoming.source_online ? "yes" : "no");
     cJSON_Delete(root);
 }
 
@@ -165,7 +180,7 @@ static void handle_aircraft(const char *data, int len)
 {
     cJSON *root = cJSON_ParseWithLength(data, len);
     if (!cJSON_IsArray(root)) {
-        ESP_LOGW(TAG, "aircraft JSON parse failed len=%d", len);
+        ESP_LOGW(TAG, "aircraft JSON parse failed len=%d -- keeping previous targets", len);
         cJSON_Delete(root);
         return;
     }
@@ -178,20 +193,23 @@ static void handle_aircraft(const char *data, int len)
         if (cJSON_IsObject(item)) parse_plane(item, temp[count++]);
     }
 
+    // Only a successfully parsed array is allowed to replace the current target set.
+    // A genuine [] therefore clears the PPI; transport/JSON errors never do.
     if (xSemaphoreTake(g_data_mutex, pdMS_TO_TICKS(100))) {
         memcpy(g_planes, temp, sizeof(g_planes));
         g_plane_count = count;
         xSemaphoreGive(g_data_mutex);
         g_data_dirty = true;
     }
+    g_last_aircraft_ms = now_ms();
 
     if (count) {
-        ESP_LOGI(TAG, "aircraft update: %u planes first=%s %.1fkm %.0fdeg",
+        ESP_LOGI(TAG, "aircraft parsed: %u first=%s %.1fkm %.0fdeg",
                  (unsigned)count,
                  temp[0].flight[0] ? temp[0].flight : temp[0].hex,
                  (double)temp[0].distance_km, (double)temp[0].bearing);
     } else {
-        ESP_LOGI(TAG, "aircraft update: 0 planes");
+        ESP_LOGI(TAG, "aircraft parsed: 0 (broker supplied an empty array)");
     }
     cJSON_Delete(root);
 }
@@ -216,9 +234,19 @@ static void handle_alert(const char *data, int len)
 
 static void dispatch_mqtt_payload(const char *topic, const char *data, int len)
 {
+    ++g_mqtt_rx_messages;
+    ESP_LOGI(TAG, "MQTT RX #%u %s %d bytes", (unsigned)g_mqtt_rx_messages, topic, len);
     if (strstr(topic, "/summary")) handle_summary(data, len);
     else if (strstr(topic, "/aircraft")) handle_aircraft(data, len);
     else if (strstr(topic, "/alert")) handle_alert(data, len);
+    else ESP_LOGW(TAG, "MQTT RX unknown topic: %s", topic);
+}
+
+static void reset_mqtt_assembly()
+{
+    g_mqtt_rx_total = 0;
+    g_mqtt_expected_len = 0;
+    g_mqtt_topic[0] = 0;
 }
 
 static void mqtt_event(void *, esp_event_base_t, int32_t event_id, void *event_data)
@@ -226,42 +254,77 @@ static void mqtt_event(void *, esp_event_base_t, int32_t event_id, void *event_d
     auto e = (esp_mqtt_event_handle_t)event_data;
     switch ((esp_mqtt_event_id_t)event_id) {
         case MQTT_EVENT_CONNECTED: {
-            ESP_LOGI(TAG, "MQTT connected");
+            ESP_LOGI(TAG, "MQTT connected -- subscribing for retained display data");
             g_mqtt_connected = true;
+            reset_mqtt_assembly();
             char topic[96];
-            snprintf(topic, sizeof(topic), "%s/summary", MQTT_BASE_TOPIC); esp_mqtt_client_subscribe(g_mqtt, topic, 0);
-            snprintf(topic, sizeof(topic), "%s/aircraft", MQTT_BASE_TOPIC); esp_mqtt_client_subscribe(g_mqtt, topic, 0);
-            snprintf(topic, sizeof(topic), "%s/alert", MQTT_BASE_TOPIC); esp_mqtt_client_subscribe(g_mqtt, topic, 0);
+            snprintf(topic, sizeof(topic), "%s/summary", MQTT_BASE_TOPIC);
+            int mid_summary = esp_mqtt_client_subscribe(g_mqtt, topic, 0);
+            ESP_LOGI(TAG, "subscribe mid=%d topic=%s", mid_summary, topic);
+            snprintf(topic, sizeof(topic), "%s/aircraft", MQTT_BASE_TOPIC);
+            int mid_aircraft = esp_mqtt_client_subscribe(g_mqtt, topic, 0);
+            ESP_LOGI(TAG, "subscribe mid=%d topic=%s", mid_aircraft, topic);
+            snprintf(topic, sizeof(topic), "%s/alert", MQTT_BASE_TOPIC);
+            int mid_alert = esp_mqtt_client_subscribe(g_mqtt, topic, 0);
+            ESP_LOGI(TAG, "subscribe mid=%d topic=%s", mid_alert, topic);
             g_data_dirty = true;
             break;
         }
+        case MQTT_EVENT_SUBSCRIBED:
+            ESP_LOGI(TAG, "MQTT subscribed msg_id=%d", e ? e->msg_id : -1);
+            break;
         case MQTT_EVENT_DISCONNECTED:
             g_mqtt_connected = false;
             g_data_dirty = true;
-            ESP_LOGW(TAG, "MQTT disconnected");
+            reset_mqtt_assembly();
+            ESP_LOGW(TAG, "MQTT disconnected -- keeping last summary/targets on screen");
+            break;
+        case MQTT_EVENT_ERROR:
+            ESP_LOGE(TAG, "MQTT error event");
             break;
         case MQTT_EVENT_DATA: {
-            if (!e || !e->data || e->data_len <= 0) break;
+            if (!e || !e->data || e->data_len < 0 || e->total_data_len <= 0) break;
+
             if (e->current_data_offset == 0) {
-                g_mqtt_rx_total = 0;
-                size_t tn = (size_t)e->topic_len < sizeof(g_mqtt_topic) - 1 ? (size_t)e->topic_len : sizeof(g_mqtt_topic) - 1;
+                reset_mqtt_assembly();
+                if (!e->topic || e->topic_len <= 0) {
+                    ESP_LOGW(TAG, "MQTT first fragment without topic");
+                    break;
+                }
+                size_t tn = (size_t)e->topic_len < sizeof(g_mqtt_topic) - 1
+                                ? (size_t)e->topic_len : sizeof(g_mqtt_topic) - 1;
                 memcpy(g_mqtt_topic, e->topic, tn);
                 g_mqtt_topic[tn] = 0;
+                g_mqtt_expected_len = e->total_data_len;
+                ESP_LOGI(TAG, "MQTT fragment start topic=%s total=%d first=%d",
+                         g_mqtt_topic, e->total_data_len, e->data_len);
             }
+
+            if (g_mqtt_expected_len <= 0 || g_mqtt_topic[0] == 0) {
+                ESP_LOGW(TAG, "MQTT orphan fragment offset=%d len=%d", e->current_data_offset, e->data_len);
+                break;
+            }
+            if (e->total_data_len != g_mqtt_expected_len) {
+                ESP_LOGW(TAG, "MQTT fragment length changed %d -> %d", g_mqtt_expected_len, e->total_data_len);
+                reset_mqtt_assembly();
+                break;
+            }
+
             size_t off = (size_t)e->current_data_offset;
             size_t n = (size_t)e->data_len;
-            if (off + n >= MQTT_RX_MAX) {
-                ESP_LOGW(TAG, "MQTT payload too large: %d", e->total_data_len);
-                g_mqtt_rx_total = 0;
+            if (off + n >= MQTT_RX_MAX || (size_t)g_mqtt_expected_len >= MQTT_RX_MAX) {
+                ESP_LOGW(TAG, "MQTT payload too large: %d", g_mqtt_expected_len);
+                reset_mqtt_assembly();
                 break;
             }
             memcpy(g_mqtt_rx + off, e->data, n);
             size_t end = off + n;
             if (end > g_mqtt_rx_total) g_mqtt_rx_total = end;
-            if (g_mqtt_rx_total >= (size_t)e->total_data_len) {
-                g_mqtt_rx[e->total_data_len] = 0;
-                dispatch_mqtt_payload(g_mqtt_topic, g_mqtt_rx, e->total_data_len);
-                g_mqtt_rx_total = 0;
+
+            if (g_mqtt_rx_total >= (size_t)g_mqtt_expected_len) {
+                g_mqtt_rx[g_mqtt_expected_len] = 0;
+                dispatch_mqtt_payload(g_mqtt_topic, g_mqtt_rx, g_mqtt_expected_len);
+                reset_mqtt_assembly();
             }
             break;
         }
@@ -283,6 +346,8 @@ static bool prepare_mqtt()
         cfg.credentials.authentication.password = MQTT_PASSWORD;
     }
     cfg.buffer.size = 6144;
+    cfg.session.keepalive = 30;
+    cfg.network.reconnect_timeout_ms = 3000;
     g_mqtt = esp_mqtt_client_init(&cfg);
     if (!g_mqtt) return false;
     if (esp_mqtt_client_register_event(g_mqtt, MQTT_EVENT_ANY, mqtt_event, nullptr) != ESP_OK) return false;
@@ -303,9 +368,16 @@ static void wifi_event(void *, esp_event_base_t base, int32_t id, void *)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) esp_wifi_connect();
     else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        g_wifi_connected = false; g_mqtt_connected = false; g_data_dirty = true; esp_wifi_connect();
+        g_wifi_connected = false;
+        g_mqtt_connected = false;
+        g_data_dirty = true;
+        ESP_LOGW(TAG, "Wi-Fi disconnected -- reconnecting and keeping last targets");
+        esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
-        g_wifi_connected = true; g_data_dirty = true; ESP_LOGI(TAG, "Wi-Fi connected"); start_mqtt();
+        g_wifi_connected = true;
+        g_data_dirty = true;
+        ESP_LOGI(TAG, "Wi-Fi connected");
+        start_mqtt();
     }
 }
 
@@ -550,10 +622,14 @@ static void update_ui_data(const Summary &s, const AircraftDot *planes, size_t c
              (double)s.nearest.speed_kt, s.nearest.track, nsq);
     lv_label_set_text(g_nearest_info, buf);
 
-    snprintf(buf, sizeof(buf), "%s\n\nWi-Fi %s\nMQTT %s\nData age %d s",
+    int64_t now = now_ms();
+    int summary_age = g_last_summary_ms ? (int)((now - g_last_summary_ms) / 1000) : -1;
+    int aircraft_age = g_last_aircraft_ms ? (int)((now - g_last_aircraft_ms) / 1000) : -1;
+    snprintf(buf, sizeof(buf), "%s\nWi-Fi %s  MQTT %s\nSummary RX %ds\nAircraft RX %ds\nTargets %u",
              s.source_online ? "SOURCE ONLINE" : "SOURCE OFFLINE",
              g_wifi_connected ? "OK" : "DOWN",
-             g_mqtt_connected ? "OK" : "DOWN", s.age_seconds);
+             g_mqtt_connected ? "OK" : "DOWN",
+             summary_age, aircraft_age, (unsigned)count);
     lv_label_set_text(g_status_info, buf);
 
     const float range = (float)g_radar_ranges[g_radar_range_idx];
@@ -595,9 +671,8 @@ static void update_ui_data(const Summary &s, const AircraftDot *planes, size_t c
     lv_obj_move_foreground(g_radar_title);
     lv_obj_move_foreground(g_radar_count);
 
-    if (shown > 0) {
-        ESP_LOGI(TAG, "PPI plotted %u/%u targets at range %dkm", (unsigned)shown, (unsigned)count, (int)range);
-    }
+    ESP_LOGI(TAG, "PPI plotted %u/%u targets at range %dkm",
+             (unsigned)shown, (unsigned)count, (int)range);
 
     if (g_alert[0] && now_ms() < g_alert_until_ms) {
         lv_label_set_text(g_alert_label, g_alert);
@@ -613,18 +688,22 @@ static void ui_task(void *)
     AircraftDot planes[MAX_PLANES]{};
     size_t count = 0;
     int last_page = -1;
+    int64_t last_status_refresh = 0;
 
     while (true) {
-        bool need_data = g_data_dirty;
+        int64_t now = now_ms();
+        bool timed_status = (now - last_status_refresh >= 5000);
+        bool need_data = g_data_dirty || timed_status;
         if (need_data && xSemaphoreTake(g_data_mutex, pdMS_TO_TICKS(50))) {
             snapshot = g_summary;
             count = g_plane_count > MAX_PLANES ? MAX_PLANES : g_plane_count;
             memcpy(planes, g_planes, sizeof(planes));
             xSemaphoreGive(g_data_mutex);
             g_data_dirty = false;
+            if (timed_status) last_status_refresh = now;
         }
 
-        bool sweep_due = (g_page == 1 && now_ms() - g_last_sweep_ms >= 55);
+        bool sweep_due = (g_page == 1 && now - g_last_sweep_ms >= 55);
         bool page_changed = g_page != last_page;
         if (need_data || sweep_due || page_changed) {
             if (bsp_display_lock(250)) {
@@ -658,7 +737,7 @@ extern "C" void app_main(void)
 
     ESP_LOGI(TAG, "Starting official ESP32-C3-LCDkit BSP display");
     g_display = bsp_display_start();
-    ESP_ERROR_CHECK(g_display ? ESP_OK : ESP_FAIL);
+    ESP_ERROR_CHECK(g_display ? ESP_OK: ESP_FAIL);
     ESP_ERROR_CHECK(bsp_display_backlight_on());
 
     if (bsp_display_lock(1000)) {
