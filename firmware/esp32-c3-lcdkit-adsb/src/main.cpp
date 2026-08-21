@@ -59,7 +59,6 @@ static volatile bool g_mqtt_started = false;
 static esp_mqtt_client_handle_t g_mqtt = nullptr;
 static lv_display_t *g_display = nullptr;
 
-// Navigation / UI state
 static int g_page = 0;
 static const int g_radar_ranges[] = {25, 50, 100, 200, 400};
 static int g_radar_range_idx = 4;
@@ -68,7 +67,6 @@ static int64_t g_last_sweep_ms = 0;
 static char g_alert[40]{};
 static int64_t g_alert_until_ms = 0;
 
-// Persistent LVGL objects: created once, then only updated.
 static lv_obj_t *g_pages[4]{};
 static lv_group_t *g_nav_group = nullptr;
 static lv_obj_t *g_nav_buttons[4]{};
@@ -78,7 +76,6 @@ static lv_obj_t *g_overview_near = nullptr;
 static lv_obj_t *g_nearest_info = nullptr;
 static lv_obj_t *g_status_info = nullptr;
 static lv_obj_t *g_alert_label = nullptr;
-
 static lv_obj_t *g_radar_scope = nullptr;
 static lv_obj_t *g_radar_title = nullptr;
 static lv_obj_t *g_radar_count = nullptr;
@@ -100,6 +97,7 @@ static void json_copy(char *dst, size_t n, const cJSON *item)
     if (!dst || n == 0) return;
     dst[0] = 0;
     if (cJSON_IsString(item) && item->valuestring) strlcpy(dst, item->valuestring, n);
+    dst[n - 1] = 0;
 }
 
 static float json_float(const cJSON *o, const char *key, float def = 0)
@@ -134,7 +132,6 @@ static bool topic_ends_with(esp_mqtt_event_handle_t e, const char *suffix)
            memcmp(e->topic + e->topic_len - n, suffix, n) == 0;
 }
 
-// MQTT callbacks only update plain data. They never touch LVGL.
 static void handle_summary(const char *data, int len)
 {
     cJSON *root = cJSON_ParseWithLength(data, len);
@@ -148,6 +145,7 @@ static void handle_summary(const char *data, int len)
         g_summary.source_online = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "source_online"));
         const cJSON *nearest = cJSON_GetObjectItemCaseSensitive(root, "nearest");
         if (cJSON_IsObject(nearest)) parse_plane(nearest, g_summary.nearest);
+        else memset(&g_summary.nearest, 0, sizeof(g_summary.nearest));
         xSemaphoreGive(g_data_mutex);
         g_data_dirty = true;
     }
@@ -157,10 +155,7 @@ static void handle_summary(const char *data, int len)
 static void handle_aircraft(const char *data, int len)
 {
     cJSON *root = cJSON_ParseWithLength(data, len);
-    if (!cJSON_IsArray(root)) {
-        cJSON_Delete(root);
-        return;
-    }
+    if (!cJSON_IsArray(root)) { cJSON_Delete(root); return; }
 
     AircraftDot temp[MAX_PLANES]{};
     size_t count = 0;
@@ -187,11 +182,12 @@ static void handle_alert(const char *data, int len)
     const cJSON *event = cJSON_GetObjectItemCaseSensitive(root, "event");
     const cJSON *flight = cJSON_GetObjectItemCaseSensitive(root, "flight");
     const cJSON *sq = cJSON_GetObjectItemCaseSensitive(root, "squawk");
-    const char *ev = cJSON_IsString(event) ? event->valuestring : "ALERT";
+    const char *ev = cJSON_IsString(event) && event->valuestring ? event->valuestring : "ALERT";
     const char *id = cJSON_IsString(flight) && flight->valuestring && flight->valuestring[0]
                          ? flight->valuestring
-                         : (cJSON_IsString(sq) ? sq->valuestring : "");
-    snprintf(g_alert, sizeof(g_alert), "%s %s", ev, id ? id : "");
+                         : (cJSON_IsString(sq) && sq->valuestring ? sq->valuestring : "");
+    snprintf(g_alert, sizeof(g_alert), "%s %s", ev, id);
+    g_alert[sizeof(g_alert) - 1] = 0;
     g_alert_until_ms = now_ms() + 12000;
     g_data_dirty = true;
     cJSON_Delete(root);
@@ -205,20 +201,14 @@ static void mqtt_event(void *, esp_event_base_t, int32_t event_id, void *event_d
             ESP_LOGI(TAG, "MQTT connected");
             g_mqtt_connected = true;
             char topic[96];
-            snprintf(topic, sizeof(topic), "%s/summary", MQTT_BASE_TOPIC);
-            esp_mqtt_client_subscribe(g_mqtt, topic, 0);
-            snprintf(topic, sizeof(topic), "%s/aircraft", MQTT_BASE_TOPIC);
-            esp_mqtt_client_subscribe(g_mqtt, topic, 0);
-            snprintf(topic, sizeof(topic), "%s/alert", MQTT_BASE_TOPIC);
-            esp_mqtt_client_subscribe(g_mqtt, topic, 0);
+            snprintf(topic, sizeof(topic), "%s/summary", MQTT_BASE_TOPIC); esp_mqtt_client_subscribe(g_mqtt, topic, 0);
+            snprintf(topic, sizeof(topic), "%s/aircraft", MQTT_BASE_TOPIC); esp_mqtt_client_subscribe(g_mqtt, topic, 0);
+            snprintf(topic, sizeof(topic), "%s/alert", MQTT_BASE_TOPIC); esp_mqtt_client_subscribe(g_mqtt, topic, 0);
             g_data_dirty = true;
             break;
         }
         case MQTT_EVENT_DISCONNECTED:
-            g_mqtt_connected = false;
-            g_data_dirty = true;
-            ESP_LOGW(TAG, "MQTT disconnected");
-            break;
+            g_mqtt_connected = false; g_data_dirty = true; ESP_LOGW(TAG, "MQTT disconnected"); break;
         case MQTT_EVENT_DATA:
             if (e && e->current_data_offset == 0 && e->data_len == e->total_data_len) {
                 if (topic_ends_with(e, "/summary")) handle_summary(e->data, e->data_len);
@@ -226,8 +216,7 @@ static void mqtt_event(void *, esp_event_base_t, int32_t event_id, void *event_d
                 else if (topic_ends_with(e, "/alert")) handle_alert(e->data, e->data_len);
             }
             break;
-        default:
-            break;
+        default: break;
     }
 }
 
@@ -263,18 +252,11 @@ static void start_mqtt()
 
 static void wifi_event(void *, esp_event_base_t base, int32_t id, void *)
 {
-    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        g_wifi_connected = false;
-        g_mqtt_connected = false;
-        g_data_dirty = true;
-        esp_wifi_connect();
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) esp_wifi_connect();
+    else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        g_wifi_connected = false; g_mqtt_connected = false; g_data_dirty = true; esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
-        g_wifi_connected = true;
-        g_data_dirty = true;
-        ESP_LOGI(TAG, "Wi-Fi connected");
-        start_mqtt();
+        g_wifi_connected = true; g_data_dirty = true; ESP_LOGI(TAG, "Wi-Fi connected"); start_mqtt();
     }
 }
 
@@ -306,16 +288,10 @@ static lv_obj_t *plain_obj(lv_obj_t *parent)
 static lv_obj_t *label(lv_obj_t *parent, const char *text, int y, uint32_t color = 0xffffff)
 {
     lv_obj_t *o = lv_label_create(parent);
-    lv_label_set_text(o, text);
+    lv_label_set_text(o, text ? text : "");
     lv_obj_set_style_text_color(o, lv_color_hex(color), 0);
     lv_obj_align(o, LV_ALIGN_TOP_MID, 0, y);
     return o;
-}
-
-static void add_title(lv_obj_t *parent, const char *text, uint32_t color)
-{
-    lv_obj_t *o = label(parent, text, 10, color);
-    lv_obj_set_style_text_align(o, LV_TEXT_ALIGN_CENTER, 0);
 }
 
 static lv_obj_t *make_page(lv_obj_t *screen)
@@ -326,14 +302,14 @@ static lv_obj_t *make_page(lv_obj_t *screen)
     return p;
 }
 
-static void make_ring(lv_obj_t *parent, int diameter, uint32_t color)
+static void make_ring(lv_obj_t *parent, int diameter)
 {
     lv_obj_t *r = plain_obj(parent);
     lv_obj_set_size(r, diameter, diameter);
     lv_obj_set_style_radius(r, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_opa(r, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(r, 1, 0);
-    lv_obj_set_style_border_color(r, lv_color_hex(color), 0);
+    lv_obj_set_style_border_color(r, lv_color_hex(RADAR_GREEN_DIM), 0);
     lv_obj_align(r, LV_ALIGN_CENTER, 0, 0);
 }
 
@@ -373,16 +349,14 @@ static void build_ui()
     lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
-    // Overview
     g_pages[0] = make_page(screen);
-    add_title(g_pages[0], "ADS-B", 0x00d7ff);
+    label(g_pages[0], "ADS-B", 10, 0x00d7ff);
     g_overview_main = label(g_pages[0], "0 AIRCRAFT", 48);
     g_overview_info = label(g_pages[0], "POS 0\nMSG/S 0\nMAX 0 km", 82);
     lv_obj_set_style_text_align(g_overview_info, LV_TEXT_ALIGN_CENTER, 0);
     g_overview_near = label(g_pages[0], "NEAREST ---", 150);
     lv_obj_set_style_text_align(g_overview_near, LV_TEXT_ALIGN_CENTER, 0);
 
-    // Radar
     g_pages[1] = make_page(screen);
     lv_obj_set_style_bg_color(g_pages[1], lv_color_hex(RADAR_BG), 0);
     lv_obj_set_style_bg_opa(g_pages[1], LV_OPA_COVER, 0);
@@ -396,27 +370,20 @@ static void build_ui()
     lv_obj_set_style_border_width(g_radar_scope, 2, 0);
     lv_obj_set_style_border_color(g_radar_scope, lv_color_hex(RADAR_GREEN_MED), 0);
     lv_obj_clear_flag(g_radar_scope, LV_OBJ_FLAG_SCROLLABLE);
-
-    make_ring(g_radar_scope, 126, RADAR_GREEN_DIM);
-    make_ring(g_radar_scope, 64, RADAR_GREEN_DIM);
+    make_ring(g_radar_scope, 126);
+    make_ring(g_radar_scope, 64);
 
     static lv_point_precise_t hpts[2] = {{12,95},{178,95}};
     static lv_point_precise_t vpts[2] = {{95,12},{95,178}};
-    lv_obj_t *h = make_line(g_radar_scope, RADAR_GREEN_DIM, 1);
-    lv_line_set_points(h, hpts, 2);
-    lv_obj_t *v = make_line(g_radar_scope, RADAR_GREEN_DIM, 1);
-    lv_line_set_points(v, vpts, 2);
-
-    lv_obj_t *north = lv_label_create(g_radar_scope);
-    lv_label_set_text(north, "N");
-    lv_obj_set_style_text_color(north, lv_color_hex(RADAR_GREEN), 0);
-    lv_obj_align(north, LV_ALIGN_TOP_MID, 0, 2);
+    lv_obj_t *h = make_line(g_radar_scope, RADAR_GREEN_DIM, 1); lv_line_set_points(h, hpts, 2);
+    lv_obj_t *v = make_line(g_radar_scope, RADAR_GREEN_DIM, 1); lv_line_set_points(v, vpts, 2);
+    lv_obj_t *north = lv_label_create(g_radar_scope); lv_label_set_text(north, "N");
+    lv_obj_set_style_text_color(north, lv_color_hex(RADAR_GREEN), 0); lv_obj_align(north, LV_ALIGN_TOP_MID, 0, 2);
 
     for (int i = 0; i < 3; ++i) {
         g_sweep_lines[i] = make_line(g_radar_scope, i == 0 ? RADAR_GREEN : RADAR_GREEN_MED, i == 0 ? 2 : 1);
         lv_line_set_points(g_sweep_lines[i], g_sweep_points[i], 2);
     }
-
     for (size_t i = 0; i < MAX_PLANES; ++i) {
         lv_obj_t *d = plain_obj(g_radar_scope);
         lv_obj_set_size(d, 5, 5);
@@ -426,22 +393,18 @@ static void build_ui()
         lv_obj_add_flag(d, LV_OBJ_FLAG_HIDDEN);
         g_radar_targets[i] = d;
     }
-
     g_radar_count = label(g_pages[1], "0/0 targets", 218, RADAR_GREEN_MED);
 
-    // Nearest
     g_pages[2] = make_page(screen);
-    add_title(g_pages[2], "NEAREST", 0x00d7ff);
+    label(g_pages[2], "NEAREST", 10, 0x00d7ff);
     g_nearest_info = label(g_pages[2], "---", 52);
     lv_obj_set_style_text_align(g_nearest_info, LV_TEXT_ALIGN_CENTER, 0);
 
-    // Receiver
     g_pages[3] = make_page(screen);
-    add_title(g_pages[3], "RECEIVER", 0x00d7ff);
+    label(g_pages[3], "RECEIVER", 10, 0x00d7ff);
     g_status_info = label(g_pages[3], "SOURCE OFFLINE", 58);
     lv_obj_set_style_text_align(g_status_info, LV_TEXT_ALIGN_CENTER, 0);
 
-    // Alert overlay
     g_alert_label = lv_label_create(screen);
     lv_label_set_text(g_alert_label, "");
     lv_obj_set_style_text_color(g_alert_label, lv_color_white(), 0);
@@ -451,7 +414,6 @@ static void build_ui()
     lv_obj_align(g_alert_label, LV_ALIGN_BOTTOM_MID, 0, -8);
     lv_obj_add_flag(g_alert_label, LV_OBJ_FLAG_HIDDEN);
 
-    // The BSP already owns the encoder and exposes it as an LVGL input device.
     lv_indev_t *indev = bsp_display_get_input_dev();
     if (indev && lv_indev_get_type(indev) == LV_INDEV_TYPE_ENCODER) {
         g_nav_group = lv_group_create();
@@ -470,8 +432,6 @@ static void build_ui()
         lv_indev_set_group(indev, g_nav_group);
         lv_group_focus_obj(g_nav_buttons[0]);
         ESP_LOGI(TAG, "Using BSP encoder input device");
-    } else {
-        ESP_LOGW(TAG, "No BSP encoder input device found");
     }
 
     for (int i = 1; i < 4; ++i) lv_obj_add_flag(g_pages[i], LV_OBJ_FLAG_HIDDEN);
@@ -491,8 +451,7 @@ static void update_sweep()
     const int offsets[3] = {0, -8, -16};
     for (int i = 0; i < 3; ++i) {
         float a = (float)(g_sweep_deg + offsets[i] - 90) * 3.14159265f / 180.0f;
-        g_sweep_points[i][0].x = cx;
-        g_sweep_points[i][0].y = cy;
+        g_sweep_points[i][0].x = cx; g_sweep_points[i][0].y = cy;
         g_sweep_points[i][1].x = cx + (int)(cosf(a) * radius);
         g_sweep_points[i][1].y = cy + (int)(sinf(a) * radius);
         lv_line_set_points(g_sweep_lines[i], g_sweep_points[i], 2);
@@ -501,25 +460,39 @@ static void update_sweep()
 
 static void update_ui_data(const Summary &s, const AircraftDot *planes, size_t count)
 {
-    lv_label_set_text_fmt(g_overview_main, "%d AIRCRAFT", s.aircraft);
+    char buf[192];
+    char nid[10];
+    char nsq[5];
+    strlcpy(nid, s.nearest.flight[0] ? s.nearest.flight : (s.nearest.hex[0] ? s.nearest.hex : "---"), sizeof(nid));
+    strlcpy(nsq, s.nearest.squawk[0] ? s.nearest.squawk : "----", sizeof(nsq));
+
+    snprintf(buf, sizeof(buf), "%d AIRCRAFT", s.aircraft);
+    lv_label_set_text(g_overview_main, buf);
     lv_obj_set_style_text_color(g_overview_main, s.source_online ? lv_color_hex(0x50e050) : lv_color_hex(0xff4040), 0);
-    lv_label_set_text_fmt(g_overview_info, "POS %d\nMSG/S %.0f\nMAX %.0f km", s.with_position, s.msg_rate, s.max_range_km);
-    const AircraftDot &n = s.nearest;
-    const char *nid = n.flight[0] ? n.flight : (n.hex[0] ? n.hex : "---");
-    lv_label_set_text_fmt(g_overview_near, "NEAREST %s\n%.1f km %d ft", nid, n.distance_km, n.altitude_ft);
 
-    lv_label_set_text_fmt(g_nearest_info, "%s\n%.1f km\n%d ft\n%.0f kt\nTRK %d\nSQ %s",
-                          nid, n.distance_km, n.altitude_ft, n.speed_kt, n.track,
-                          n.squawk[0] ? n.squawk : "----");
+    snprintf(buf, sizeof(buf), "POS %d\nMSG/S %.0f\nMAX %.0f km", s.with_position, (double)s.msg_rate, (double)s.max_range_km);
+    lv_label_set_text(g_overview_info, buf);
 
-    lv_label_set_text_fmt(g_status_info, "%s\n\nWi-Fi %s\nMQTT %s\nData age %d s",
-                          s.source_online ? "SOURCE ONLINE" : "SOURCE OFFLINE",
-                          g_wifi_connected ? "OK" : "DOWN",
-                          g_mqtt_connected ? "OK" : "DOWN", s.age_seconds);
+    snprintf(buf, sizeof(buf), "NEAREST %s\n%.1f km %d ft", nid, (double)s.nearest.distance_km, s.nearest.altitude_ft);
+    lv_label_set_text(g_overview_near, buf);
+
+    snprintf(buf, sizeof(buf), "%s\n%.1f km\n%d ft\n%.0f kt\nTRK %d\nSQ %s",
+             nid, (double)s.nearest.distance_km, s.nearest.altitude_ft,
+             (double)s.nearest.speed_kt, s.nearest.track, nsq);
+    lv_label_set_text(g_nearest_info, buf);
+
+    snprintf(buf, sizeof(buf), "%s\n\nWi-Fi %s\nMQTT %s\nData age %d s",
+             s.source_online ? "SOURCE ONLINE" : "SOURCE OFFLINE",
+             g_wifi_connected ? "OK" : "DOWN",
+             g_mqtt_connected ? "OK" : "DOWN", s.age_seconds);
+    lv_label_set_text(g_status_info, buf);
 
     const float range = (float)g_radar_ranges[g_radar_range_idx];
-    lv_label_set_text_fmt(g_radar_title, "RADAR %d km", (int)range);
+    snprintf(buf, sizeof(buf), "RADAR %d km", (int)range);
+    lv_label_set_text(g_radar_title, buf);
+
     size_t shown = 0;
+    if (count > MAX_PLANES) count = MAX_PLANES;
     for (size_t i = 0; i < MAX_PLANES; ++i) {
         if (i >= count || planes[i].distance_km <= 0 || planes[i].distance_km > range) {
             lv_obj_add_flag(g_radar_targets[i], LV_OBJ_FLAG_HIDDEN);
@@ -529,16 +502,15 @@ static void update_ui_data(const Summary &s, const AircraftDot *planes, size_t c
         float rr = (planes[i].distance_km / range) * 82.0f;
         int x = (int)(cosf(a) * rr);
         int y = (int)(sinf(a) * rr);
-        bool emergency = strcmp(planes[i].squawk, "7500") == 0 ||
-                         strcmp(planes[i].squawk, "7600") == 0 ||
-                         strcmp(planes[i].squawk, "7700") == 0;
+        bool emergency = !strcmp(planes[i].squawk, "7500") || !strcmp(planes[i].squawk, "7600") || !strcmp(planes[i].squawk, "7700");
         lv_obj_set_size(g_radar_targets[i], emergency ? 7 : 5, emergency ? 7 : 5);
         lv_obj_set_style_bg_color(g_radar_targets[i], emergency ? lv_color_hex(0xff3030) : lv_color_hex(RADAR_GREEN), 0);
         lv_obj_align(g_radar_targets[i], LV_ALIGN_CENTER, x, y);
         lv_obj_remove_flag(g_radar_targets[i], LV_OBJ_FLAG_HIDDEN);
         ++shown;
     }
-    lv_label_set_text_fmt(g_radar_count, "%u/%u targets", (unsigned)shown, (unsigned)count);
+    snprintf(buf, sizeof(buf), "%u/%u targets", (unsigned)shown, (unsigned)count);
+    lv_label_set_text(g_radar_count, buf);
 
     if (g_alert[0] && now_ms() < g_alert_until_ms) {
         lv_label_set_text(g_alert_label, g_alert);
@@ -559,7 +531,7 @@ static void ui_task(void *)
         bool need_data = g_data_dirty;
         if (need_data && xSemaphoreTake(g_data_mutex, pdMS_TO_TICKS(50))) {
             snapshot = g_summary;
-            count = g_plane_count;
+            count = g_plane_count > MAX_PLANES ? MAX_PLANES : g_plane_count;
             memcpy(planes, g_planes, sizeof(planes));
             xSemaphoreGive(g_data_mutex);
             g_data_dirty = false;
@@ -569,10 +541,7 @@ static void ui_task(void *)
         bool page_changed = g_page != last_page;
         if (need_data || sweep_due || page_changed) {
             if (bsp_display_lock(250)) {
-                if (page_changed) {
-                    set_visible_page(g_page);
-                    last_page = g_page;
-                }
+                if (page_changed) { set_visible_page(g_page); last_page = g_page; }
                 if (need_data) update_ui_data(snapshot, planes, count);
                 if (sweep_due) {
                     g_sweep_deg = (g_sweep_deg + 5) % 360;
@@ -598,7 +567,6 @@ extern "C" void app_main(void)
 
     g_data_mutex = xSemaphoreCreateMutex();
     ESP_ERROR_CHECK(g_data_mutex ? ESP_OK : ESP_ERR_NO_MEM);
-
     if (!prepare_mqtt()) ESP_LOGE(TAG, "MQTT preparation failed");
 
     ESP_LOGI(TAG, "Starting official ESP32-C3-LCDkit BSP display");
@@ -611,8 +579,7 @@ extern "C" void app_main(void)
         bsp_display_unlock();
     }
 
-    xTaskCreate(ui_task, "adsb-ui", 5120, nullptr, 4, nullptr);
-
+    xTaskCreate(ui_task, "adsb-ui", 6144, nullptr, 4, nullptr);
     ESP_LOGI(TAG, "Starting Wi-Fi");
     wifi_init();
 }
